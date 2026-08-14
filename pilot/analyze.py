@@ -34,7 +34,6 @@ from pilot.rescale import compute_C, reset_tolerance_counts, tolerance_counts
 
 _MIN_POINT = min(config.SCALE_POINTS)
 _MAX_POINT = max(config.SCALE_POINTS)
-_ORIENT_OFFSET = _MIN_POINT + _MAX_POINT
 
 RATING_FIELDS = ("y_v_draws", "z_lo_draws", "z_hi_draws", "y_n_draws", "other_draws")
 
@@ -97,14 +96,23 @@ class PilotReport:
 
 
 def _orient(draw: int, direction: str) -> int:
-    """Re-orients a raw draw to the common 'higher = more likely' frame."""
-    if direction == config.SCALE_ASCENDING:
-        return draw
-    if direction == config.SCALE_DESCENDING:
-        return _ORIENT_OFFSET - draw
-    raise ValueError(
-        f"scale_direction must be one of {config.SCALE_DIRECTIONS}, got {direction!r}"
-    )
+    """Identity. Validates `direction`; deliberately does not transform `draw`.
+
+    DESIGN.md §3 fixes the number-to-label mapping (1 = Very unlikely ... 5 =
+    Very likely) and randomises only the order the five lines are *printed* in.
+    A reply of 5 therefore means "Very likely" under both directions, so there is
+    no frame to convert between. Subtracting the draw from 6 here silently
+    inverted every descending observation: it turned 39/39 clean anchor orderings
+    into 19 misorderings and made P2 fail on the first real run.
+
+    Direction sensitivity is measured, per §3, by comparing raw means across
+    directions in `_order_effects` — not by transforming values.
+    """
+    if direction not in config.SCALE_DIRECTIONS:
+        raise ValueError(
+            f"scale_direction must be one of {config.SCALE_DIRECTIONS}, got {direction!r}"
+        )
+    return draw
 
 
 def _valid_draws(draws: list[int | None], direction: str) -> list[int]:
