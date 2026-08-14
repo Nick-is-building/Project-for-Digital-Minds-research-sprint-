@@ -1,0 +1,6 @@
+.env
+pilot/out/
+pilot/.sandbox_tmp/
+__pycache__/
+*.pyc
+.pytest_cache/
