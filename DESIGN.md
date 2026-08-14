@@ -82,10 +82,19 @@ The three questions differ only in the pronoun. Any further asymmetry manufactur
 a response-consistency violation for purely linguistic reasons.
 
 ```
-VIGNETTE:  "How likely is it that this solution is correct?"
-SELF:      "How likely is it that your solution is correct?"
-OTHER:     "How likely is it that this solution is correct?"
+VIGNETTE:  "How likely is it that this solution passes every test case,
+            including edge cases?"
+SELF:      "How likely is it that your solution passes every test case,
+            including edge cases?"
+OTHER:     "How likely is it that this solution passes every test case,
+            including edge cases?"
 ```
+
+Reworded 2026-08-14 from "...is correct?". Ground truth (§8) is "passes ALL
+hidden tests" — the original wording asked something vaguer than that and
+invited a reflexive 5 regardless of actual test coverage. This wording names
+the actual measurement instead. The three questions remain identical apart
+from the self/other pronoun.
 
 Each is asked as its own message. The model is instructed to reply with the
 number only. Parsing is strict: on failure the value is `null` and is counted as

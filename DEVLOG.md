@@ -471,20 +471,347 @@ a regression test around `_orient`, and a higher `MAX_OUTPUT_TOKENS_RATING`.
 
 ---
 
+## 2026-08-14 21:30 — Sonnet (claude-sonnet-5, Claude Code)
+
+**Built:** A difficulty-mix task set and a reworded question, addressing the
+previous entry's root cause and its two related open items.
+
+- `pilot/tasks.py`: `_load_mbpp` (renamed from the old loader) + new
+  `_load_lbpp`, loading the python subset of `CohereForAI/lbpp` (Matton et al.,
+  EMNLP 2024). `Task` gains `task_set` ("mbpp"/"lbpp") and `setup_code`
+  (default `""`); `task_id` is now a string (`"mbpp/11"`, `"lbpp/python/000"`)
+  so the two sources can't collide in one field. `load_tasks()` now returns
+  `n_mbpp + n_lbpp` concatenated instead of one uniform pull.
+- `pilot/sandbox.py`: `run_solution` gains an optional `setup_code` parameter
+  (default `""`, so MBPP and vignette calls are byte-identical to before). It
+  strips LBPP's `from code import <fn>` line (assumes a separate module this
+  sandbox doesn't have) and keeps the rest — e.g. `import numpy as np` —
+  appended between the inlined solution and the asserts.
+- `pilot/analyze.py`: `Observation` gains `task_set` (Sonnet, per the new
+  CLAUDE.md line below); a new "Task-set comparison (MBPP vs LBPP)" section in
+  `report.md` reuses `_p1`/`_p2`/`_p4`/`_diagnostics` completely unchanged,
+  grouped by `"<model> · <task_set>"` instead of by model alone. `compute_C`,
+  every P1–P4 threshold, and the pooled GO verdict (still computed via
+  `_by_model`) are untouched.
+- `run_pilot.py`: passes `task.setup_code` into all three `sandbox.run_solution`
+  calls and `task.task_set` into both `Observation` constructions.
+- `pilot/config.py`: `NUM_MBPP_TASKS=10` / `NUM_LBPP_TASKS=10` replace
+  `NUM_PILOT_TASKS=20`; `QUESTION_VIGNETTE`/`SELF`/`OTHER` reworded to "...passes
+  every test case, including edge cases?"; `ANSWER_INSTRUCTION` strengthened to
+  "Reply with a single digit and nothing else — no words, no punctuation, no
+  explanation."
+- `DESIGN.md` §4 updated to the new wording with the reason recorded inline.
+- `CLAUDE.md`: one line added to the model-routing rule, per the user —
+  `analyze.py` is Opus-only for metric definitions, threshold/pass-fail logic,
+  and anything feeding `compute_C`; purely additive reporting is fine on
+  Sonnet if flagged here.
+- `pilot/tests/test_sandbox.py`: two new tests for `setup_code` (the
+  from-code-import line is stripped and ignored; other imports are honoured).
+
+**Decided:**
+
+- *`task_id` is a string, not an int.* MBPP's native ids (11–30) and LBPP's
+  native ids (`lbpp/python/NNN`) don't share a type; prefixing both
+  (`f"mbpp/{id}"`) keeps one field, globally unique, with no computation
+  depending on it being numeric.
+- *LBPP's `entry_point` comes from the `signature` field via
+  `^\s*def\s+(\w+)\s*\(`, not from parsing a test statement.* A LBPP
+  `test_list` entry is a multi-line block (setup lines, then an assert), not a
+  bare `assert f(...)` like MBPP's, so MBPP's assert-parsing regex does not
+  apply and `signature` is the more direct source anyway.
+- *LBPP qualification bar: >= `config.LBPP_MIN_TESTS` (3) test_list entries*,
+  mirroring MBPP's >=3-assert bar, plus a regex-extractable entry point. Hand-
+  checked the resulting first 10 python-split tasks (ids 000–009): only numpy
+  and pandas are required beyond stdlib (both installed in this venv), and
+  none touch list partitioning, so rating the vignette still can't leak an
+  answer into this half of the set either.
+- *`setup_code` stripping lives in `sandbox.py`, not `tasks.py`.* `tasks.py`
+  loads `test_setup` verbatim — "honour test_setup if present," read literally
+  — and script assembly (solution + setup + asserts, one process, no separate
+  `code.py` module) is already `sandbox.py`'s job.
+- *The by-task-set report addition was cleared with the user as "purely
+  additive reporting"* before any `analyze.py` edit, per CLAUDE.md's model-
+  routing rule (Sonnet this session). Two hard boundaries were set and held:
+  no changes to any P1–P4 threshold value, pass/fail logic, `compute_C`, or
+  `rescale.py`. Verified by rerunning the full suite after every `analyze.py`
+  edit and by never touching `_by_model` (still the sole input to the pooled
+  `PilotReport`).
+
+**Did not work:**
+
+- *LBPP's `test_list` and `test_setup` are double-encoded, not plain values.*
+  The real chain is `base64 -> zlib.decompress -> pickle.loads -> (still a
+  string!) -> ast.literal_eval`. `pickle.loads` alone returns a string that
+  *prints* like a Python list or a Python string with real newlines, which is
+  misleading: `len()` on the post-`pickle.loads` "test_list" gave 576 (a
+  string length) instead of 3 (the actual number of test entries), and the
+  post-`pickle.loads` "test_setup" contained literal `\n` two-character
+  escapes rather than real newlines, so a first attempt at detecting
+  `"from code import"` in it silently found nothing. Both were caught before
+  they reached the sandbox, by checking `type()` and length by hand rather
+  than trusting a `print()` that happened to look right.
+- *Nearly repeated a mistake this file already warned about.* A synthetic
+  smoke test of the new by-task-set `analyze.py` code called `write_report()`
+  with hand-built `Observation` objects to check it didn't crash. `write_report`
+  writes to the fixed path `config.OUT_DIR / "report.md"` regardless of caller,
+  so this overwrote the real pilot's `report.md` with made-up numbers — the
+  exact failure mode the 2026-08-14 (condition-V ordering bug) entry already
+  named ("a file of made-up results sitting in `out/` is exactly what gets
+  mistaken for data later"). Caught immediately via `git status` before doing
+  anything else; restored with `git checkout -- pilot/out/report.md`.
+  `observations.jsonl` (the source of truth) was never touched, so no data was
+  lost, but the near-miss is logged here rather than quietly fixed and
+  forgotten. Any future smoke test of `analyze.py`/`write_report` should assert
+  on the returned markdown string, not call it against the real `out/` path.
+
+**State:** `pytest pilot/tests/ -v` passes **29/29** (27 pre-existing + 2 new).
+`python run_pilot.py --dry-run` prints the corrected sequence end to end: the
+new question wording and the strengthened answer instruction appear in every
+rating block, `task_id` displays as a string (`mbpp/11`), and the planned
+budget is unchanged at **1040 calls / 1200 MAX_CALLS** — still 20 tasks total,
+now 10 MBPP + 10 LBPP instead of 20 MBPP. Verified by hand (not pytest): a
+real LBPP task (`lbpp/python/000`, `add_avg_and_std_cols_numpy`) loads
+end-to-end through `sandbox.run_solution`, and a solution that never imports
+numpy itself still resolves `np` at assert time via the honoured
+`test_setup`, correctly for both a right and a wrong reference solution.
+Re-ran `VIGNETTE_LOW`/`VIGNETTE_HIGH` through `sandbox.run_solution` under the
+new wording (the vignette texts themselves are unchanged): LOW still fails
+2/7 hidden asserts — asserts[1] and [4], the same two failures as the original
+verification — and passes the other 5/7; HIGH still passes 7/7. **Zero API
+calls, zero spend this session** —
+`pilot/out/raw.jsonl` is unchanged at 1023 lines.
+
+Untested: the new task-set comparison section has only been exercised against
+hand-built synthetic `Observation` objects (see "Did not work" above), never
+against a real elicited run — `pilot/out/report.md` on disk still reflects
+the pre-LBPP, pre-wording-change pilot and is now stale relative to the code.
+The reworded questions and the strengthened single-digit instruction have
+never been sent to a real model; whether the instruction change actually
+reduces Claude's parse-failure rate is unverified until the next real run. No
+LBPP task has been attempted by a real model — only a hand-written reference
+solution has been run through the sandbox.
+
+**Next:** run the real pilot (2 models x 20 tasks, new mix + new wording) —
+held per the user's explicit instruction to stop after the dry-run and wait
+for confirmation.
+
+---
+
+## 2026-08-14 22:00 — Sonnet (claude-sonnet-5, Claude Code)
+
+**Built:** Nothing new in code. Two pieces of bookkeeping ahead of the real
+pilot run: a correction to this file, and a literature note that reframes what
+a flat self-report distribution means.
+
+**Decided:**
+
+- *The previous entry's "LOW still fails 5/7 hidden asserts" was wrong and is
+  now corrected in place (see above): LOW fails 2/7 (asserts[1] and [4]) and
+  passes the other 5/7, HIGH passes 7/7.* Re-verified fresh, per-assert, this
+  session, in direct response to the user flagging a discrepancy against an
+  earlier session's "2 of 7 fail" claim. All three data points — the original
+  session, the prior verification run's raw boolean list
+  (`[True, False, True, True, False, True, True]`), and this session's fresh
+  rerun — agree on 2/7 failing. The only thing that was ever wrong was this
+  file's prose, which reported the pass-count as if it were the fail-count.
+  The vignette code and `VIGNETTE_HIDDEN_ASSERTS` were not touched.
+- *Confidence saturation is being reframed as a validity question, not just a
+  calibration nuisance*, per three sources the user supplied: "Verbal
+  Confidence Saturation in 3-9B Open-Weight Instruction-Tuned LLMs: A
+  Pre-Registered Psychometric Validity Screen" (arXiv:2604.22215), arXiv:2607.19367,
+  and Wang and Stengel-Eskin (2026). arXiv:2604.22215's argument: a distribution
+  collapsed to the ceiling cannot support item-level discrimination, because the
+  ordinal relationships between items are lost at the moment of elicitation, not
+  afterward — so post-hoc rescaling cannot recover what was never elicited in the
+  first place. The other two sources report the same ceiling/floor concentration
+  on unrelated tasks (verbal and logit-based confidence generally; TriviaQA and
+  SimpleQA respectively), so this is not specific to our coding-task setup.
+- *This gives anchoring vignettes a second job beyond bias correction: telling
+  apart two explanations for a flat self-report that are otherwise
+  indistinguishable* — either the model has no graded internal signal to
+  report, or it has one but cannot express it on this response scale. If the
+  vignette ratings (`z_lo`, `z_hi`) vary across models/tasks while the
+  self-rating `y` does not, the scale itself is shown to be usable by this
+  model in this context, which means the flat `y` is evidence about the model,
+  not an artifact of an unusable scale.
+- *Our own pilot-1 numbers already look like the direction-specific case*: mean
+  `z_lo` differed sharply between models (1.890 vs 1.021) while `z_hi` and `y`
+  were both pinned at the ceiling (5.000) for both models. Read against the
+  above, this suggests saturation here is one-directional — the top of the
+  scale is unusable, the bottom is not — rather than the whole scale being
+  dead. Flagged here as a framing candidate for the writeup, not asserted as a
+  finding; pilot-1 is a go/no-go check on the old MBPP-only, old-wording setup
+  and this reframing has not yet been checked against the reworded questions or
+  the harder LBPP half.
+
+**Did not work:** N/A this entry — bookkeeping only.
+
+**State:** No code changed. `pilot/out/raw.jsonl` and `observations.jsonl` were
+reset to empty and the pilot-1 data (1023 / 40 lines, old wording, MBPP-only)
+was preserved as `pilot/out/raw.pilot1_mbpp_only_backup.jsonl` and
+`observations.pilot1_mbpp_only_backup.jsonl`, mirroring the existing
+`raw.pre_pilot_backup.jsonl` precedent — so the next run's cost/token/call
+summary (which reads the whole file) reports only the new run, not a mix of
+old-wording and new-wording data.
+
+**Next:** run the real pilot (`python run_pilot.py`, 2 models x 20 tasks, 10
+MBPP + 10 LBPP, reworded questions) and report per DESIGN.md §9/§10 plus the
+per-task-set `y`/`z_lo`/`z_hi` distributions and `y == z_hi` share the user
+asked for, raw and uninterpreted.
+
+---
+
+## 2026-08-14 22:40 — Sonnet (claude-sonnet-5, Claude Code)
+
+**Built:** The second real pilot run, on the difficulty-mixed task set and
+reworded questions from the previous entry. `pilot/out/report.md`,
+`raw.jsonl` (990 lines), `observations.jsonl` (40 lines) now reflect this run
+only — the first pilot's data was moved to `raw.pilot1_mbpp_only_backup.jsonl`
+/ `observations.pilot1_mbpp_only_backup.jsonl` beforehand, per the previous
+entry's decision.
+
+**Decided:** Nothing new. This entry is a run record, not a design change.
+
+**Did not work:**
+
+- *Gemini made 470 calls against a planned 520, not a bug.* 2 of its 10 LBPP
+  tasks failed code extraction (`code_extraction_failure_rate` 20% on the LBPP
+  half); the early-return-on-failed-codegen path in `run_pilot.py` skips the
+  25 downstream rating calls for a task once code generation itself is
+  unusable, rather than rating a nonexistent solution. `470 = 520 - 2*25`,
+  exactly. Confirmed by counting `code_extraction_failure_rate` against the
+  gap rather than assumed.
+
+**State:** `GO` on P1, P2, P3 (both tie_rule bounds agree, as always). **P4
+FAILED** for gemini-3.6-flash (signed self/other gap 0.822, threshold 0.75) —
+driven entirely by its LBPP half (gap 1.425 on LBPP vs 0.340 on MBPP); claude
+passed P4 on both halves. Verdicts do not change between tie_rule bounds — no
+P1-P4 threshold is a function of C, so the bound choice affects only the C
+distribution and `ambiguous_C_rate` (0% for both models, both bounds).
+
+The pattern the user's literature note anticipated is present in this run's
+numbers, not just pilot-1's: `y` (condition-V self-rating) and `z_hi` are
+both saturated at or near 5.0 for both models on both task sets — mean C is
+4.000 (claude) and 3.944 (gemini) pooled, with **every non-null C value equal
+to 3 or 4**, none at 1, 2, or 5. `z_lo` is the only quantity with real spread
+(claude: 1.0-2.0 depending on task; gemini: pinned at exactly 1.0 on every
+single observation in both halves). `y == z_hi` (tolerance 0.01): claude
+20/20 pooled (10/10 MBPP, 10/10 LBPP), gemini 17/18 pooled (9/10 MBPP, 8/8
+LBPP). Full per-task-set `y`/`z_lo`/`z_hi` distributions are in the chat
+report to the user for this entry's date, not duplicated here.
+
+Cost: $0.3506 (claude-haiku, 520 calls). Gemini has no configured price
+(`PRICE_PER_MTOK_USD['gemini-3.6-flash']` still `None`) — 470 calls, 212393 in
+/ 1398 out / 16388 thought tokens, reported as tokens only.
+
+**Next:** Decide how to frame P4's failure and the near-total C=3/4 collapse
+in the sprint writeup — both are now reproduced across two independent runs
+(different task mix, different wording), so they look like properties of
+these models/this scale rather than an artifact of the first pilot's setup.
+The task-set split suggests LBPP (harder, more execution failures) is what
+pushes gemini's P4 gap over threshold — worth checking against MBPP-only
+numbers before generalizing.
+
+---
+
+## 2026-08-14 23:10 — Sonnet (claude-sonnet-5, Claude Code) — session close, no code changed
+
+**Built:** Nothing. This entry exists so the next session can read the
+conclusion of pilot 2 in one place instead of reconstructing it from the two
+entries above. No control experiment was started, per explicit instruction.
+
+**Decided:** Nothing new.
+
+**Did not work:** N/A.
+
+**State — the conclusion, stated plainly:**
+
+- The run returned **GO on P1-P3**, but **the GO is hollow**: pooled across
+  both models and both task sets, `y` (condition-V self-rating) is 5.0 in
+  **37 of 38** valid observations, `z_hi` is 5.0 in **38 of 38**, and
+  `y == z_hi` in **37 of 38** (tolerance 0.01). With `y` and `z_hi` this
+  close to identical this close to always, `C` is constant almost everywhere
+  no rescaling can improve a correlation between confidence and correctness
+  that the elicitation never captured in the first place.
+- **Saturation survived both attempted fixes.** The 10 MBPP + 10 LBPP
+  difficulty mix (2026-08-14 21:30) and the "passes every test case,
+  including edge cases" wording (same entry) were both tried specifically to
+  break this. Claude gave `y = 5.0` on all 10 MBPP tasks **and** all 10 LBPP
+  tasks — harder tasks changed `execution_failure_rate` (0% to 30% for
+  claude, 10% to 80% for gemini) but did not move stated self-confidence at
+  all.
+- **This is not an inability to grade — it is specific to grading one's own
+  code.** Claude's `z_lo` (rating of the fixed low-quality *foreign* vignette)
+  took **six distinct values**: 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, spread across
+  tasks. The same model, same scale, same context format, produces graded,
+  varying output when the code is not its own, and a flat ceiling value when
+  it is. The scale is usable by this model; the model does not use it on
+  itself.
+- **The effect is model-specific, and for one model the correction is
+  mathematically vacuous.** Gemini's `z_lo` was **constant at exactly 1.0**
+  across every single observation in both task sets (see the per-task-set
+  distributions in the previous entry / the chat report of this date). With
+  both anchors constant for gemini, `compute_C` degenerates to a monotone
+  recoding of `y` for every gemini observation — this is the exact invariance
+  case CLAUDE.md's "ONE RULE" section warns about ("if vignette ratings are
+  constant across observations, `compute_C` becomes a monotone recoding of
+  the self-report, and every rank-based metric is mathematically guaranteed to
+  show exactly zero change"), now observed in real elicited data rather than
+  only in simulation. Claude's `z_lo` varying is what keeps claude's
+  correction non-vacuous; gemini's does not have that.
+- **P4 (response consistency): gemini FAILED, claude PASSED.** Signed
+  self-minus-other gap on byte-identical code: gemini **0.822** (threshold
+  0.75), claude **-0.130**. This reverses pilot 1, where both models passed
+  P4 on the easier, saturated MBPP-only set — see the P4 bullet in Open
+  Questions below for the full before/after.
+- **Parse failures: 17 (pilot 1) to 0 (pilot 2)**, after strengthening
+  `ANSWER_INSTRUCTION` to demand a single digit and nothing else. Neither the
+  parser nor `MAX_OUTPUT_TOKENS_RATING = 8` was touched.
+- **Next step, not yet started: a control experiment on scale granularity.**
+  Same 20 tasks (10 MBPP + 10 LBPP), same two models, but a 0-100 scale
+  instead of 1-5, to rule out that a 5-point scale is simply too coarse to
+  register near-ceiling distinctions a finer scale could show. This would be
+  a deviation from the locked "exactly 5 scale points" decision in CLAUDE.md
+  (justified there by Wang, Zhou & Liu, arXiv:2608.08869) — it is a
+  *diagnostic* run to characterize the saturation, not a change to the
+  main-experiment design, and should be labeled as such wherever it is
+  reported. **Not started this session, per explicit instruction to close
+  without beginning it.**
+
+**Next:** Design and run the 0-100 control experiment described above, as its
+own clearly-labeled pilot variant, once a session is authorized to start it.
+
+---
+
 # Open Questions
 
 Add anything unresolved. Remove anything answered. This section is the handover
 between sessions.
 
 - **THE blocking issue: `y` has no variance, because MBPP is too easy for these
-  models.** `y_v` is exactly 5.000 in 36/39 observations and `z_hi` in 39/39, so
-  `y == z_hi` and `C = 4` almost everywhere; both bound choices give byte-identical
-  C distributions. No P1–P4 threshold asks whether `C` varies, which is why the
-  pilot returns GO anyway. **Do not "fix" this by lowering the high anchor** —
-  simulation shows that with `y` pinned at the ceiling, `C` collapses to a constant
-  5 in 94 % of cases, i.e. strictly worse. The fix is a harder task set, so the
-  models are not uniformly maximally confident. Vignettes, anchors and the 5-point
-  scale all stay as they are; the locked scale decision does not need reopening.
+  models.** **Fix attempted 2026-08-14 21:30 (10 MBPP + 10 LBPP mix) did NOT
+  work, confirmed by the 2026-08-14 22:40 real run.** `y` (condition-V
+  self-rating) is 5.0 in every single claude observation on both halves (20/20)
+  and in 17/18 non-null gemini observations, on MBPP *and* LBPP alike —
+  `execution_failure_rate` on gemini's LBPP half jumped to 80 % (vs 10 % on its
+  MBPP half), so the tasks plainly got harder, but the model's *stated*
+  confidence did not move off the ceiling regardless. `z_hi` is 5.0 in every
+  observation on both halves too. Non-null `C` is 3 or 4 for all 38 computed
+  values, none at 1, 2 or 5, on both tie_rule bounds. **Making the coding task
+  harder is not sufficient to break self-rating saturation** — the saturation
+  looks like it lives in how the model uses the response scale, not in whether
+  it is actually uncertain about its own code. This is exactly the split the
+  2026-08-14 22:00 literature note (arXiv:2604.22215 etc.) predicted: `z_lo`
+  still varies substantially (claude 1.0-2.0 across tasks; gemini flat at
+  exactly 1.0) while `y`/`z_hi` do not, so the scale is demonstrably usable by
+  these models in this context — the flat `y` is a fact about the models, not
+  proof the scale can't carry information. **Do not "fix" this by lowering the
+  high anchor** — unchanged from the original concern, simulation still shows
+  `C` collapsing to a constant 5 in 94 % of cases if `y` stays pinned at the
+  ceiling. Next candidate interventions, not yet tried: adversarial/edge-case-
+  heavy tasks specifically designed to induce doubt, or accepting saturation as
+  a reportable finding about these models rather than something to engineer
+  away.
 - **P1 does not catch collapse to the endpoints.** It passed at its floor: 3
   distinct points, zero draws at 3 and 4, mass at 1, 2 and 5. It was written to
   catch collapse to a single value. Consider adding an interior-use or
@@ -499,17 +826,29 @@ between sessions.
   and nothing in the 27 tests would catch a regression. A test asserting that a
   descending draw is returned unchanged, and that raw anchor orderings are
   direction-independent, belongs in `pilot/tests/`.
-- **`MAX_OUTPUT_TOKENS_RATING = 8` costs real measurements, unevenly.** 17 of
-  Claude's rating replies were truncated mid-sentence after a valid leading digit,
-  16 of them on the low vignette. Raising the ceiling would recover them; relaxing
-  the parser to take the leading digit would too, but after seeing the data that
-  is fitting the instrument to the results, so it was not done. Decide before the
-  main run, where the same 3 % loss lands on ~15,600 calls.
-- **P4 (response consistency) passed in the pilot but on a saturated scale.**
-  Signed gaps were -0.320 (Claude) and -0.042 (Gemini), well inside the 0.75
-  threshold. With self- and other-ratings both near the ceiling, the probe had
-  little room to show a gap, so this is weak evidence of consistency rather than
-  strong evidence. Original concern retained below.
+- **`MAX_OUTPUT_TOKENS_RATING = 8` costs real measurements, unevenly.**
+  **Attempted fix (2026-08-14 21:30, strengthened `ANSWER_INSTRUCTION`) WORKED,
+  confirmed by the 2026-08-14 22:40 real run: `parse_failure_rate` is 0.0 % for
+  both models, pooled and per task set** — zero parse failures out of 990 raw
+  calls, versus 17 in the first pilot (all Claude, all on the low vignette).
+  The parser and `MAX_OUTPUT_TOKENS_RATING = 8` were left unchanged, as
+  instructed; the instruction wording alone was sufficient this time. Keep
+  watching this at main-experiment scale (~15,600 calls) rather than treating
+  one clean run as proof it can never recur.
+- **P4 (response consistency) passed in pilot 1 but FAILED in the 2026-08-14
+  22:40 real run, for gemini only.** Pilot 1 (MBPP-only, old wording): signed
+  gaps -0.320 (Claude) / -0.042 (Gemini), both well inside 0.75, but on a
+  saturated scale with little room to show a gap — flagged at the time as weak
+  evidence. Pilot 2 (10 MBPP + 10 LBPP, new wording): Claude still passes
+  (-0.130), but gemini's gap widened to **0.822**, over threshold, driven
+  almost entirely by its LBPP half (gap 1.425 on LBPP vs 0.340 on MBPP — LBPP
+  is also where gemini's execution_failure_rate jumps to 80 %). Reading these
+  two runs together: P4 passing in pilot 1 looks like it was an artifact of
+  easy tasks giving the probe no room to disagree, not evidence that
+  attribution gating is absent. The harder task set gave the gap room to show
+  up, and it did, in exactly the direction Plisiecki et al. predict. Does not
+  block GO but must be named as a limitation in the writeup, with this
+  reversal shown, not just the latest number.
 - **P4 (response consistency) is untested and is the assumption most likely to
   fail.** Plisiecki et al. (arXiv:2607.20082) document "attribution gating":
   models treat self-attribution differently from other-attribution. If a model

@@ -41,3 +41,16 @@ def test_import_os_rejected_before_execution():
         result = sandbox.run_solution(IMPORT_OS_SOLUTION, ASSERTS)
     assert result is False
     mock_popen.assert_not_called()
+
+
+def test_setup_code_from_code_import_is_stripped_and_ignored():
+    # LBPP's test_setup assumes the solution lives in a separate `code.py`
+    # module; that import must not be executed against our inlined script.
+    setup = "from code import add\n\n"
+    assert sandbox.run_solution(CORRECT_SOLUTION, ASSERTS, setup) is True
+
+
+def test_setup_code_other_imports_are_honoured():
+    setup = "from code import add\nimport math\n"
+    asserts = ["assert add(1, 2) == 3", "assert math.floor(1.5) == 1"]
+    assert sandbox.run_solution(CORRECT_SOLUTION, asserts, setup) is True

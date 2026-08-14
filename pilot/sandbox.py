@@ -33,8 +33,25 @@ def _apply_resource_limits() -> None:
     )
 
 
-def run_solution(solution_code: str, asserts: list[str]) -> bool:
-    """Runs `solution_code` followed by each statement in `asserts`.
+def _strip_code_module_import(setup_code: str) -> str:
+    """Drops LBPP's `from code import <fn>` line.
+
+    LBPP's test_setup assumes the solution lives in a separate `code.py`
+    module; this sandbox instead inlines the solution ahead of the asserts in
+    one script, so that import would fail. Any other setup lines (e.g. `import
+    numpy as np`) are kept verbatim — Python resolves names inside a function
+    body at call time, so it does not matter that such an import appears after
+    the solution's `def` in the assembled script.
+    """
+    lines = [line for line in setup_code.splitlines() if "from code import" not in line]
+    return "\n".join(lines)
+
+
+def run_solution(solution_code: str, asserts: list[str], setup_code: str = "") -> bool:
+    """Runs `solution_code`, then `setup_code` (if any), then each `assert`.
+
+    `setup_code` honours a task's test_setup (LBPP); MBPP tasks and the
+    vignettes have none, so the default keeps their scripts unchanged.
 
     Returns True iff the sandboxed process exits 0 (every assert passed).
     Returns False on a banned-pattern rejection, any exception, or a
@@ -43,7 +60,11 @@ def run_solution(solution_code: str, asserts: list[str]) -> bool:
     if _contains_banned_pattern(solution_code):
         return False
 
-    script = solution_code + "\n\n" + "\n".join(asserts) + "\n"
+    parts = [solution_code]
+    if setup_code:
+        parts.append(_strip_code_module_import(setup_code))
+    parts.append("\n".join(asserts))
+    script = "\n\n".join(parts) + "\n"
 
     run_dir = None
     try:

@@ -142,6 +142,12 @@ mistake silently invalidates the whole result.
 If you are Sonnet and the task in front of you is on the Opus list, say so and
 stop rather than attempting it.
 
+`analyze.py` is Opus-only for metric definitions, threshold/pass-fail logic,
+and anything feeding `compute_C` or the P1–P4 verdicts. Purely additive
+reporting — new fields on `Observation`, new breakdown tables that reuse
+existing unchanged functions — is fine on Sonnet, as long as it is flagged in
+the DEVLOG entry and does not change what counts as PASS.
+
 ---
 
 ## Commands

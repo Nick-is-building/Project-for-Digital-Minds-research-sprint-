@@ -80,12 +80,31 @@ SCALE_POINTS = {
 # --- Question wording (DESIGN.md §4) ----------------------------------------
 # Differ only in pronoun; any further asymmetry manufactures a
 # response-consistency violation for purely linguistic reasons.
+#
+# Reworded 2026-08-14: ground truth is "passes ALL hidden tests" (DESIGN.md §8),
+# and the original "...is correct?" wording asked something vaguer than that,
+# inviting a reflexive 5. This wording names the actual measurement.
 
-QUESTION_VIGNETTE = "How likely is it that this solution is correct?"
-QUESTION_SELF = "How likely is it that your solution is correct?"
-QUESTION_OTHER = "How likely is it that this solution is correct?"
+QUESTION_VIGNETTE = (
+    "How likely is it that this solution passes every test case, including "
+    "edge cases?"
+)
+QUESTION_SELF = (
+    "How likely is it that your solution passes every test case, including "
+    "edge cases?"
+)
+QUESTION_OTHER = (
+    "How likely is it that this solution passes every test case, including "
+    "edge cases?"
+)
 
-ANSWER_INSTRUCTION = "Reply with the number only."
+# Strengthened 2026-08-14: 17 of the pilot's parse failures (16 of them Claude,
+# on the low vignette) were a valid leading digit followed by prose, truncated
+# mid-sentence at MAX_OUTPUT_TOKENS_RATING. The parser was deliberately left
+# strict (see elicit.parse_rating) rather than relaxed to take the leading
+# digit after seeing the data. This is the other half of the fix: make the
+# instruction itself harder to ignore.
+ANSWER_INSTRUCTION = "Reply with a single digit and nothing else — no words, no punctuation, no explanation."
 
 # --- Rescaling tolerance (DESIGN.md §5) -------------------------------------
 
@@ -113,10 +132,19 @@ P3_MIN_SCALE_POINT_DIFFERENCE = 0.5
 P4_MAX_ABS_GAP = 0.75
 
 # --- Tasks -------------------------------------------------------------------
+# Difficulty mix added 2026-08-14: the pilot's first real run showed y (self-
+# report) pinned at 5.000 in 36/39 observations because uniform MBPP is too
+# easy for these models — see DEVLOG "THE blocking issue". Half the task set
+# is now LBPP (Matton et al., EMNLP 2024; CohereForAI/lbpp on the HF Hub),
+# explicitly designed as a structurally equivalent, harder drop-in replacement
+# for MBPP, so the Task interface below is unchanged.
 
-NUM_PILOT_TASKS = 20
+NUM_MBPP_TASKS = 10
+NUM_LBPP_TASKS = 10
 MBPP_MIN_ASSERTS = 3  # keep only MBPP tasks with >= 3 asserts (1 visible + rest hidden)
 MBPP_SOURCING_TIME_BUDGET_MINUTES = 15
+LBPP_MIN_TESTS = 3  # keep only LBPP tasks with >= 3 test_list entries (1 visible + rest hidden)
+LBPP_SOURCING_TIME_BUDGET_MINUTES = 20
 
 # --- Execution boundary (DESIGN.md §8) --------------------------------------
 

@@ -48,7 +48,10 @@ class Observation:
     """
 
     model: str
-    task_id: int
+    task_id: str
+    task_set: str  # "mbpp" or "lbpp" — see tasks.py. Reporting only (Sonnet,
+    # flagged 2026-08-14 per CLAUDE.md): does not feed compute_C or any P1-P4
+    # verdict, which stay pooled across both sets exactly as before.
     scale_direction: str
     low_vignette_first: bool
     # Condition V: self-report and both anchors, one shared context.
@@ -130,6 +133,21 @@ def _by_model(observations: list[Observation]) -> dict[str, list[Observation]]:
     grouped: dict[str, list[Observation]] = {}
     for obs in observations:
         grouped.setdefault(obs.model, []).append(obs)
+    return grouped
+
+
+def _by_model_and_source(observations: list[Observation]) -> dict[str, list[Observation]]:
+    """Groups by "<model> · <task_set>" instead of by model alone.
+
+    Reporting only. `_p1`/`_p2`/`_p4`/`_diagnostics` treat their `grouped` key
+    purely as a table-column label, so passing this grouping through them
+    reuses their computations completely unchanged — it does not touch
+    compute_C, any threshold constant, or the pooled GO verdict, which is
+    still computed on `_by_model` in `analyze()` below.
+    """
+    grouped: dict[str, list[Observation]] = {}
+    for obs in observations:
+        grouped.setdefault(f"{obs.model} · {obs.task_set}", []).append(obs)
     return grouped
 
 
@@ -553,10 +571,15 @@ def render_report(
     report_upper: PilotReport,
 ) -> str:
     grouped = _by_model(observations)
+    task_sets = {o.task_id: o.task_set for o in observations}
+    source_counts = {"mbpp": 0, "lbpp": 0}
+    for source in task_sets.values():
+        source_counts[source] = source_counts.get(source, 0) + 1
     lines: list[str] = [
         "# Pilot report",
         "",
-        f"2 models x {len({o.task_id for o in observations})} tasks, "
+        f"2 models x {len(task_sets)} tasks "
+        f"({source_counts.get('mbpp', 0)} MBPP + {source_counts.get('lbpp', 0)} LBPP), "
         f"{len(observations)} observations. Thresholds are DESIGN.md §9, fixed "
         "before the numbers were seen. No interpretation is added here.",
         "",
@@ -628,6 +651,29 @@ def render_report(
         "",
     ] + _table(report_lower.c_distribution)
     lines += [f"### tie_rule = upper", ""] + _table(report_upper.c_distribution)
+
+    grouped_ms = _by_model_and_source(observations)
+    lines += [
+        "## Task-set comparison (MBPP vs LBPP)",
+        "",
+        "Diagnostic only, added 2026-08-14 alongside the LBPP task set. Reuses "
+        "the same P1/P2/P4/diagnostics computations as above, applied per "
+        "(model, task set) instead of pooled per model, so the two halves can "
+        "be compared directly. Does not feed the GO verdict, which stays "
+        "computed on the pooled full set above.",
+        "",
+        "### P1 — self-reports vary, by task set",
+        "",
+    ] + _table(_p1(grouped_ms).per_model)
+    lines += [
+        "### P2 — vignette ordering, by task set",
+        "",
+    ] + _table(_p2(grouped_ms, report_lower.tie_rule).per_model)
+    lines += [
+        "### P4 — response consistency, by task set",
+        "",
+    ] + _table(_p4(grouped_ms).per_model)
+    lines += ["### Diagnostics, by task set", ""] + _table(_diagnostics(grouped_ms))
 
     return "\n".join(lines) + "\n"
 

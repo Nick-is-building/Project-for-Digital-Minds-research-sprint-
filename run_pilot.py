@@ -191,6 +191,7 @@ def _run_observation(
         return analyze.Observation(
             model=model,
             task_id=task.task_id,
+            task_set=task.task_set,
             scale_direction=direction,
             low_vignette_first=low_first,
             y_v_draws=[],
@@ -219,6 +220,7 @@ def _run_observation(
     return analyze.Observation(
         model=model,
         task_id=task.task_id,
+        task_set=task.task_set,
         scale_direction=direction,
         low_vignette_first=low_first,
         y_v_draws=v_draws["self"],
@@ -226,9 +228,9 @@ def _run_observation(
         z_hi_draws=v_draws["high"],
         y_n_draws=y_n_draws,
         other_draws=other_draws,
-        passes_hidden=sandbox.run_solution(solution, task.hidden_asserts),
-        passes_visible=sandbox.run_solution(solution, [task.visible_assert]),
-        executes_cleanly=sandbox.run_solution(solution, []),
+        passes_hidden=sandbox.run_solution(solution, task.hidden_asserts, task.setup_code),
+        passes_visible=sandbox.run_solution(solution, [task.visible_assert], task.setup_code),
+        executes_cleanly=sandbox.run_solution(solution, [], task.setup_code),
         code_extracted=True,
     )
 

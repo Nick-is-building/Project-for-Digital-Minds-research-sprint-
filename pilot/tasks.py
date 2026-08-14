@@ -1,79 +1,156 @@
-"""Loads the pilot's coding tasks.
+"""Loads the pilot's coding tasks: a difficulty mix of MBPP and LBPP.
 
-Source: MBPP test split (`google-research-datasets/mbpp` on the HF Hub — the
-canonical `mbpp` repo id fails to load under datasets>=4, see DEVLOG.md). Tasks
+MBPP source: test split of `google-research-datasets/mbpp` on the HF Hub — the
+canonical `mbpp` repo id fails to load under datasets>=4, see DEVLOG.md. Tasks
 are filtered to those with >= config.MBPP_MIN_ASSERTS asserts, a single
-consistent entry-point function name across all asserts, and no setup code
-(keeps the sandbox's execution model simple: prompt + solution + one assert
-per exec). The first assert becomes visible, the rest hidden.
+consistent entry-point function name across all asserts, and no setup code.
+The first assert becomes visible, the rest hidden.
+
+LBPP source: python subset of `CohereForAI/lbpp` on the HF Hub (Matton et al.,
+EMNLP 2024) — explicitly designed as a structurally equivalent, harder
+drop-in replacement for MBPP. Added 2026-08-14 because uniform MBPP left the
+pilot's self-report `y` pinned at the scale ceiling (DEVLOG "THE blocking
+issue"). `test_list` and `test_setup` ship base64+zlib+pickle-obfuscated
+(contamination-proofing, not a security boundary — the pickled payload is
+itself a Python literal, decoded with `ast.literal_eval`, never executed).
+The first test_list entry becomes visible, the rest hidden, same as MBPP.
+`entry_point` comes from the `signature` field rather than from parsing an
+assert, since a LBPP test entry is a multi-line block, not a bare assert.
+
+Each loaded Task records which set it came from (`task_set`), so the pilot
+report can compare the two halves.
 
 VIGNETTE_LOW and VIGNETTE_HIGH (DESIGN.md §7) also live here: they are
 task-shaped constants, but fixed and hand-written rather than loaded.
 """
 
+import ast
+import base64
+import pickle
 import re
+import zlib
 from dataclasses import dataclass
 
 from datasets import load_dataset
 
 from pilot import config
 
-_ENTRY_POINT_RE = re.compile(r"assert\s+(\w+)\(")
+_MBPP_ENTRY_POINT_RE = re.compile(r"assert\s+(\w+)\(")
+_LBPP_SIGNATURE_RE = re.compile(r"^\s*def\s+(\w+)\s*\(")
 
 
 @dataclass(frozen=True)
 class Task:
-    task_id: int
+    task_id: str
     prompt: str
     visible_assert: str
     hidden_asserts: list[str]
     entry_point: str
+    task_set: str  # "mbpp" or "lbpp"
+    setup_code: str = ""  # honoured verbatim if present (LBPP only)
 
 
-def _entry_point(assert_stmt: str) -> str | None:
-    match = _ENTRY_POINT_RE.match(assert_stmt)
+# --- MBPP --------------------------------------------------------------------
+
+
+def _mbpp_entry_point(assert_stmt: str) -> str | None:
+    match = _MBPP_ENTRY_POINT_RE.match(assert_stmt)
     return match.group(1) if match else None
 
 
-def _qualifies(row: dict) -> str | None:
+def _mbpp_qualifies(row: dict) -> str | None:
     """Returns the entry point name if `row` qualifies, else None."""
     if row["test_setup_code"]:
         return None
     if len(row["test_list"]) < config.MBPP_MIN_ASSERTS:
         return None
-    entry_points = {_entry_point(a) for a in row["test_list"]}
+    entry_points = {_mbpp_entry_point(a) for a in row["test_list"]}
     if len(entry_points) != 1 or None in entry_points:
         return None
     return entry_points.pop()
 
 
-def load_tasks(n: int = config.NUM_PILOT_TASKS) -> list[Task]:
+def _load_mbpp(n: int) -> list[Task]:
     """Loads the first `n` qualifying MBPP test-split tasks, by task_id."""
     dataset = load_dataset("google-research-datasets/mbpp", split="test")
     rows = sorted(dataset, key=lambda r: r["task_id"])
 
-    tasks: list[Task] = []
+    loaded: list[Task] = []
     for row in rows:
-        entry_point = _qualifies(row)
+        entry_point = _mbpp_qualifies(row)
         if entry_point is None:
             continue
-        tasks.append(
+        loaded.append(
             Task(
-                task_id=row["task_id"],
+                task_id=f"mbpp/{row['task_id']}",
                 prompt=row["text"],
                 visible_assert=row["test_list"][0],
                 hidden_asserts=list(row["test_list"][1:]),
                 entry_point=entry_point,
+                task_set="mbpp",
             )
         )
-        if len(tasks) == n:
+        if len(loaded) == n:
             break
 
-    if len(tasks) < n:
-        raise RuntimeError(
-            f"Only found {len(tasks)} qualifying MBPP tasks, needed {n}."
+    if len(loaded) < n:
+        raise RuntimeError(f"Only found {len(loaded)} qualifying MBPP tasks, needed {n}.")
+    return loaded
+
+
+# --- LBPP ----------------------------------------------------------------------
+
+
+def _lbpp_decode(value: str | None) -> object:
+    """Reverses LBPP's base64 -> zlib -> pickle -> (Python-literal string) chain."""
+    if not value:
+        return value
+    pickled = pickle.loads(zlib.decompress(base64.b64decode(value)))
+    return ast.literal_eval(pickled)
+
+
+def _lbpp_entry_point(signature: str) -> str | None:
+    match = _LBPP_SIGNATURE_RE.match(signature)
+    return match.group(1) if match else None
+
+
+def _load_lbpp(n: int) -> list[Task]:
+    """Loads the first `n` qualifying LBPP python-split tasks, by task_id."""
+    dataset = load_dataset("CohereForAI/lbpp", "python", split="test")
+    rows = sorted(dataset, key=lambda r: r["task_id"])
+
+    loaded: list[Task] = []
+    for row in rows:
+        entry_point = _lbpp_entry_point(row["signature"])
+        if entry_point is None:
+            continue
+        test_list = _lbpp_decode(row["test_list"])
+        if not isinstance(test_list, list) or len(test_list) < config.LBPP_MIN_TESTS:
+            continue
+        loaded.append(
+            Task(
+                task_id=row["task_id"],
+                prompt=row["instruction"],
+                visible_assert=test_list[0],
+                hidden_asserts=list(test_list[1:]),
+                entry_point=entry_point,
+                task_set="lbpp",
+                setup_code=_lbpp_decode(row["test_setup"]) or "",
+            )
         )
-    return tasks
+        if len(loaded) == n:
+            break
+
+    if len(loaded) < n:
+        raise RuntimeError(f"Only found {len(loaded)} qualifying LBPP tasks, needed {n}.")
+    return loaded
+
+
+def load_tasks(
+    n_mbpp: int = config.NUM_MBPP_TASKS, n_lbpp: int = config.NUM_LBPP_TASKS
+) -> list[Task]:
+    """Loads the pilot's difficulty-mix task set: `n_mbpp` MBPP + `n_lbpp` LBPP."""
+    return _load_mbpp(n_mbpp) + _load_lbpp(n_lbpp)
 
 
 # --- Vignettes (DESIGN.md §7) ------------------------------------------------
