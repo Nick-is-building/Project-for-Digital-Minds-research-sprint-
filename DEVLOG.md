@@ -280,6 +280,78 @@ code-generation profile of `elicit.py`, and `sandbox.py` on real model output.
 
 ---
 
+## 2026-08-14 — Claude Opus 4.7 (claude-opus-5)
+
+**Built:** `pilot/analyze.py` and `run_pilot.py` — the pipeline now exists end to
+end. `analyze.py` implements DESIGN.md §9's four criteria and nothing beyond
+them, runs the whole analysis twice (once per bound choice) and writes
+`out/report.md` with the two verdict columns side by side. `ambiguous_C_rate`
+sits next to `misorder_rate` and `tie_rate` per the user's decision. Tolerance
+firing is now counted and reported (DESIGN.md §5), closing the "nothing resets or
+reports `tolerance_counts`" gap from the last entry. `run_pilot.py` drives 2
+models x 20 tasks x conditions V and N plus the P4 probe, with `--dry-run`.
+`elicit.py` gained `elicit_text` (returns raw text, so a reply can be replayed
+verbatim as an assistant turn — `str(int)` would not preserve it) and
+`parse_rating`; `elicit` is now a thin wrapper over it, so every call still logs
+to `raw.jsonl` before parsing. `config.py` gained the §9 thresholds, the scale-
+direction constants, `PILOT_RANDOM_SEED` and `PRICE_PER_MTOK_USD`.
+
+**Decided:** *Condition V is sampled as 5 independent conversation threads, not 5
+replays of a fixed prefix.* Each thread re-elicits both vignette ratings and then
+the self-rating in one context, so the model's own anchors are in its context
+when it rates itself — that is the mechanism King & Wand (2007) identify, and the
+reason for CLAUDE.md's one rule. *One solution per (model, task), generated once
+and reused across V, N and the P4 probe.* Forced by P4, which only means anything
+if the code rated as "yours" and the code rated as "someone else's" are
+byte-identical. *No AUROC, correlations, variance ratios or significance tests,*
+per the user's instruction: 20 tasks makes any such number noise. *The two
+bound-choice runs are reported as structurally unable to disagree on a verdict,*
+because no P1–P4 threshold is a function of C; the bound choice moves the C
+distribution and `ambiguous_C_rate`, which is where §5's robustness check
+actually lives. *`PRICE_PER_MTOK_USD` left as `None` rather than guessed* — a
+wrong constant there would silently misreport spend, and `gemini-3.6-flash`
+pricing is newer than this assistant's training data. The cost summary prints
+token counts and names which prices are missing.
+
+**Did not work:** *The first `run_pilot.py` built condition V's message sequence
+wrongly, and the first `--dry-run` caught it before any API spend.* The deleted
+`_condition_v_thread` pre-appended both vignette questions and then spliced the
+answers back with `messages.insert(2 + position + 1, ...)`. The index arithmetic
+was off: call 3's prefix omitted the high-vignette question entirely, two
+consecutive `assistant` turns appeared, and the high vignette text landed after
+both ratings instead of before the second. Worse, the dry-run had its own copy of
+the sequencing logic, so it reproduced the bug faithfully instead of exposing it
+— the transcript looked plausible line by line. Fixed by making `_walk_condition_v`
+the single source of truth: it builds the thread incrementally with no index
+arithmetic and both the real run and the dry-run pass it a `respond` callback.
+Verified programmatically afterwards, not by eye: 3 calls per thread, roles
+strictly alternating u/a/u → u/a/u/a/u → u/a/u/a/u/a/u, every prefix ending on a
+user turn, vignette texts at indices 2 and 4, LOW before HIGH. *A first
+`analyze.py` smoke test wrote synthetic numbers to `out/report.md`*; deleted,
+because a file of made-up results sitting in `out/` is exactly what gets mistaken
+for data later.
+
+**State:** `pytest pilot/tests/ -v` passes **27/27**. `python run_pilot.py
+--dry-run` prints the full corrected condition-V transcript and the budget:
+26 calls per (model, task) = 1 code generation + 15 condition V (5 threads x 3
+questions) + 5 condition N + 5 P4 probe; x 20 tasks x 2 models = **1040 planned
+calls against `MAX_CALLS` 1200, headroom 160**. `raw.jsonl` is still 8 lines —
+**zero API calls and zero spend across both sessions so far.**
+
+Untested: everything that needs a real API response. `analyze.py` has only ever
+seen synthetic observations (the four criteria, orientation, off-scale exclusion,
+tie/misorder/ambiguous counting and the C distribution were each exercised
+against hand-built inputs, but never against elicited ratings). `run_pilot.py`
+has never made a call, so the Gemini multi-turn path, `_extract_code`,
+`MAX_OUTPUT_TOKENS_DEFAULT=1024` for code generation, and `sandbox.py` on
+model-generated code are all unexercised. Resumability is claimed by the
+append-immediately design but has never been tested by interrupting a run.
+
+**Next:** run the real pilot — but not before the user says so; this session was
+instructed to stop at the dry-run.
+
+---
+
 # Open Questions
 
 Add anything unresolved. Remove anything answered. This section is the handover
@@ -308,28 +380,33 @@ between sessions.
   silently invert LOW and HIGH. A `test_vignettes.py` asserting LOW fails and
   HIGH passes against `VIGNETTE_HIDDEN_ASSERTS` would close this; it was left out
   this session only to stay inside the assigned scope.
-- **Is a misordered anchor pair with `y` outside the crossed region acceptable as
-  point-identified?** `rescale.py` returns `C=5` under both bounds for
-  `z_lo=4, z_hi=2, y=5`, because `y` is above both anchors regardless of the
-  ordering violation. This is more informative than discarding every misordered
-  observation, but DESIGN.md §5 reads as though tied/misordered always yields a
-  genuine interval. Confirm the reading before `analyze.py` counts misorderings.
-- **`tolerance_counts` is process-global and nothing resets or reports it.**
-  Whoever writes `run_pilot.py` must call `reset_tolerance_counts()` at the start
-  and record the counts at the end, or the DESIGN.md §5 requirement to record how
-  often the tolerance fires goes unmet in practice.
+- **Resumability is designed for but never tested.** Every call appends to
+  `raw.jsonl` before parsing, but nothing reads that file back to skip work
+  already done — an interrupted run currently restarts from zero and pays twice.
+  With 1040 planned calls this matters. Decide before the real run whether to add
+  resume-from-`raw.jsonl` or to accept the risk.
 - **CLAUDE.md's Commands block says `pytest tests/ -v`; the real path is
   `pytest pilot/tests/ -v`.** Left unedited because CLAUDE.md is the user's
   control document — worth a one-character fix by the user.
-- **Prompt caching is not yet in the design.** Our sampling pattern sends 5 calls
-  with an identical prefix — the ideal caching case (write 1.25×, read 0.1×).
-  Roughly two-thirds off input cost, which is ~97 % of spend. Should be added
-  before the main run, not needed for the pilot.
+- **Prompt caching is not yet in the design, and condition V now benefits less
+  from it than this note originally assumed.** Condition N and the P4 probe do
+  send 5 calls with an identical prefix — the ideal caching case (write 1.25×,
+  read 0.1×). Condition V's 5 threads share only the code-generation prefix; from
+  the first vignette rating onward each thread diverges, because the ratings are
+  re-elicited per thread on purpose. The cacheable share is therefore smaller than
+  "two-thirds off input cost" implies. Recompute against real token counts from
+  the pilot before deciding for the main run.
 - **Task count for the main run assumes 100.** Simulation gives 98 % at 100 vs
   93 % at 60. Revisit only if budget forces it.
-- **`MAX_OUTPUT_TOKENS_DEFAULT` (1024) for code-generation calls is a
-  provisional guess**, never exercised against a real code-gen prompt.
-  Revisit once the actual code-generation prompt is designed in `run_pilot.py`.
+- **`MAX_OUTPUT_TOKENS_DEFAULT` (1024) is still a guess.** The code-generation
+  prompt now exists (one MBPP problem, its visible assert, "reply with a single
+  Python function and no explanation"), so 1024 should be ample — but a truncated
+  reply would surface as an `_extract_code` failure, i.e. as apparent model
+  incompetence rather than as a config problem. `code_extraction_failure_rate` is
+  in the report for exactly this reason; check it first if it is non-zero.
+- **`PRICE_PER_MTOK_USD` is `None` for both models.** No cost figure can be
+  reported until the user fills these in from the providers' current pricing
+  pages. Token counts are printed regardless.
 - **The full multi-turn DESIGN.md §4 flow (vignettes + self-question replayed
   in one context) is untested.** Only single-turn rating questions have been
   run so far. `elicit.py`'s Gemini path builds this via explicit
