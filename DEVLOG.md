@@ -427,9 +427,47 @@ points for both models, with **zero draws at 3 and 4** and the mass at 1, 2 and 
 Untested: resumability. `analyze.py` has now run on real data, but `_orient`'s
 correction is not covered by a test.
 
-**Next:** decide whether the ceiling saturation is acceptable for the main
-experiment, since it is what determines whether `C` can vary at all — and get a
-regression test around `_orient` before anything else is built on `analyze.py`.
+**Conclusion — read this before trusting the GO.** The pilot returned **GO on all
+four preregistered criteria**, and that GO is nonetheless *not* the result. The
+thresholds passed while missing the decisive fact.
+
+*What the thresholds missed.* `z_hi` is exactly 5.000 in **39/39** observations
+and the condition-V self-report `y_v` is exactly 5.000 in **36/39**. So
+`y == z_hi` almost always, and `C = 4` almost everywhere. The rescaling carries
+**almost no variation despite P2 being perfect** — anchors 100 % cleanly ordered,
+zero ties, zero misorderings. A criterion set can be fully satisfied while the
+instrument transmits nothing, because nothing in P1–P4 asks whether `C` varies.
+
+*Root cause is NOT anchor placement.* The tempting fix — lower the high anchor so
+`z_hi` sits below the ceiling — was tested by independent simulation and is
+**worse**: with `y` still pinned at the ceiling, `C` collapses to a constant 5 in
+**94 %** of cases. Moving the anchor cannot help while the quantity being anchored
+has no variance. **The root cause is that `y` itself has no variance:** the models
+are uniformly maximally confident in their own code, because MBPP tasks are too
+easy for them. The ceiling is a property of the task set, not of the vignettes.
+
+*Supporting evidence that the design itself works.* P3 found **real between-model
+scale-use variation**: mean `z_lo` 1.890 (Claude) against 1.021 (Gemini), spread
+0.869. Two models shown byte-identical vignettes used the scale measurably
+differently. That is precisely the response bias the method exists to correct, and
+it is present and measurable. It simply **cannot reach `C` while `y` is pinned at
+the ceiling** — the correction has a real input and no room to act.
+
+*P1 passed at its floor, and the shape matters more than the verdict.* 3 distinct
+points for both models, **zero draws at 3 and 4**, with the mass at 1, 2 and 5.
+That is a response style at the extremes, not graded confidence. P1 was written to
+catch collapse to a single value; it does not catch collapse to the endpoints.
+
+*Measurement loss.* 17 parse failures, all Claude, **16 of them on the low
+vignette**: a valid digit followed by prose, truncated at
+`MAX_OUTPUT_TOKENS_RATING = 8`. The parser was **deliberately not relaxed** —
+taking the leading digit after seeing the data would be fitting the instrument to
+its own results. Fix the token ceiling instead, before the next run.
+
+**Next:** raise task difficulty until `y` varies — that is the one blocking issue,
+and neither the vignettes nor the anchors nor the scale need touching to address
+it. Do not treat the GO as licence to start the main experiment. Also still owed:
+a regression test around `_orient`, and a higher `MAX_OUTPUT_TOKENS_RATING`.
 
 ---
 
@@ -438,16 +476,24 @@ regression test around `_orient` before anything else is built on `analyze.py`.
 Add anything unresolved. Remove anything answered. This section is the handover
 between sessions.
 
-- **Ceiling saturation is the biggest open risk after the pilot, and no threshold
-  catches it.** `z_hi` was exactly 5.000 in 39/39 observations and `y_v` in 36/39,
-  so the equality tolerance decided `y == z_hi` 36 times and `C = 4` almost
-  everywhere. P2 passes (anchors cleanly ordered) while `C` still carries close to
-  no variation, because the high anchor and the self-report are pinned to the same
-  boundary. Both bound choices give byte-identical C distributions for the same
-  reason. Decide before the main run whether to address it — a harder high
-  vignette, a wider scale, or a task set the models are less confident on — and
-  note that changing the scale reopens the locked 5-point decision, so it needs
-  the user.
+- **THE blocking issue: `y` has no variance, because MBPP is too easy for these
+  models.** `y_v` is exactly 5.000 in 36/39 observations and `z_hi` in 39/39, so
+  `y == z_hi` and `C = 4` almost everywhere; both bound choices give byte-identical
+  C distributions. No P1–P4 threshold asks whether `C` varies, which is why the
+  pilot returns GO anyway. **Do not "fix" this by lowering the high anchor** —
+  simulation shows that with `y` pinned at the ceiling, `C` collapses to a constant
+  5 in 94 % of cases, i.e. strictly worse. The fix is a harder task set, so the
+  models are not uniformly maximally confident. Vignettes, anchors and the 5-point
+  scale all stay as they are; the locked scale decision does not need reopening.
+- **P1 does not catch collapse to the endpoints.** It passed at its floor: 3
+  distinct points, zero draws at 3 and 4, mass at 1, 2 and 5. It was written to
+  catch collapse to a single value. Consider adding an interior-use or
+  endpoint-share check before the main run, so a bimodal response style cannot
+  pass as graded confidence.
+- **The between-model bias the method targets is real and measurable.** P3: mean
+  `z_lo` 1.890 (Claude) vs 1.021 (Gemini), spread 0.869, on byte-identical
+  vignettes. Worth keeping in view — it is the evidence that the correction has
+  something genuine to act on once `y` can vary, and it belongs in the write-up.
 - **`_orient` has no regression test.** It silently inverted every descending
   observation and produced a false NO-GO on the first run; the fix is a one-liner
   and nothing in the 27 tests would catch a regression. A test asserting that a
