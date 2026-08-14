@@ -49,6 +49,18 @@ and ask.
 
 ---
 
+## Known pitfalls (2026-08-14)
+
+- **Gemini keys start `AQ.Ab`, not `AIza`.** This is the new "Auth key" format, not a mistake — see API facts above.
+- **The OpenAI-compat layer rejects `AQ.` keys.** Use the native Interactions API (`client.interactions.create`), not `models.generate_content` and not any OpenAI-compat shim.
+- **`thinking_level` and `thinking_budget` cannot both be set.** Sending both is a 400 error — use `thinking_level` only on Gemini 3.x.
+- **`thinking_level="minimal"` is accepted and returns 0 thought tokens.** Confirmed by a live call. Use it for rating calls; leave default thinking for code generation.
+- **The canonical `mbpp` HF dataset id fails to load** under `datasets>=4` (a URI-parsing bug in the loader). Use `google-research-datasets/mbpp` instead — same data, works fine.
+- **A single typo'd character in an API key produces a generic 401,** not a helpful message. Verify the exact prefix (`sk-ant-api03-`, not `ssk-ant-`) character by character before assuming a code bug.
+- **This VM's system Python is externally managed (PEP 668).** `pip install` fails outright unless you add `--user --break-system-packages` (already the pattern used for `datasets`/`anthropic`). Needed this for `google-genai` and `python-dotenv`.
+
+---
+
 ## What this project is
 
 We test whether **anchoring vignettes** (King & Wand 2007) can correct the
