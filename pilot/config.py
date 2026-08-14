@@ -63,7 +63,7 @@ PILOT_RANDOM_SEED = 20260814
 # than this assistant's training data. run_pilot prints token counts either way
 # and says which prices are missing.
 PRICE_PER_MTOK_USD: dict[str, dict[str, float | None]] = {
-    ANTHROPIC_MODEL: {"input": None, "output": None},
+    ANTHROPIC_MODEL: {"input": 1.00, "output": 5.00},
     GOOGLE_MODEL: {"input": None, "output": None},
 }
 

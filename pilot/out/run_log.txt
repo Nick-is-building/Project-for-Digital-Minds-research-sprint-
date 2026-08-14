@@ -1,0 +1,52 @@
+Starting pilot: 1040 planned calls, MAX_CALLS=1200.
+  claude-haiku-4-5-20251001 task 11: done
+  claude-haiku-4-5-20251001 task 12: done
+  claude-haiku-4-5-20251001 task 13: done
+  claude-haiku-4-5-20251001 task 14: done
+  claude-haiku-4-5-20251001 task 15: done
+  claude-haiku-4-5-20251001 task 16: done
+  claude-haiku-4-5-20251001 task 17: done
+  claude-haiku-4-5-20251001 task 18: done
+  claude-haiku-4-5-20251001 task 19: done
+  claude-haiku-4-5-20251001 task 20: done
+  claude-haiku-4-5-20251001 task 21: done
+  claude-haiku-4-5-20251001 task 22: done
+  claude-haiku-4-5-20251001 task 23: done
+  claude-haiku-4-5-20251001 task 24: done
+  claude-haiku-4-5-20251001 task 25: done
+  claude-haiku-4-5-20251001 task 26: done
+  claude-haiku-4-5-20251001 task 27: done
+  claude-haiku-4-5-20251001 task 28: done
+  claude-haiku-4-5-20251001 task 29: done
+  claude-haiku-4-5-20251001 task 30: done
+  gemini-3.6-flash task 11: done
+  gemini-3.6-flash task 12: done
+  gemini-3.6-flash task 13: done
+  gemini-3.6-flash task 14: done
+  gemini-3.6-flash task 15: done
+  gemini-3.6-flash task 16: done
+  gemini-3.6-flash task 17: done
+  gemini-3.6-flash task 18: done
+  gemini-3.6-flash task 19: done
+  gemini-3.6-flash task 20: done
+  gemini-3.6-flash task 21: done
+  gemini-3.6-flash task 22: done
+  gemini-3.6-flash task 23: done
+  gemini-3.6-flash task 24: done
+  gemini-3.6-flash task 25: done
+  gemini-3.6-flash task 26: done
+  gemini-3.6-flash task 27: done
+  gemini-3.6-flash task 28: done
+  gemini-3.6-flash task 29: done
+  gemini-3.6-flash task 30: done
+
+Wrote /home/Kathi/New Project Digital Minds Hackathon Sprint/pilot/out/report.md
+--- Usage summary (pilot/out/raw.jsonl) ---
+claude-haiku-4-5-20251001: 525 calls, 230686 input tokens, 5482 output tokens, 0 thought tokens
+gemini-2.5-flash: 1 calls, 0 input tokens, 0 output tokens, 0 thought tokens
+gemini-3.6-flash: 497 calls, 164974 input tokens, 1238 output tokens, 12424 thought tokens
+--- Cost summary ---
+claude-haiku-4-5-20251001: $0.2581
+gemini-2.5-flash: no price configured — set config.PRICE_PER_MTOK_USD['gemini-2.5-flash'] from the provider's pricing page. Tokens: 0 in / 0 out.
+gemini-3.6-flash: no price configured — set config.PRICE_PER_MTOK_USD['gemini-3.6-flash'] from the provider's pricing page. Tokens: 164974 in / 1238 out.
+Total across models with a configured price: $0.2581

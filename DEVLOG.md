@@ -352,11 +352,118 @@ instructed to stop at the dry-run.
 
 ---
 
+## 2026-08-14 — Claude Opus 4.7 (claude-opus-5)
+
+**Built:** The pilot ran for real. `pilot/out/raw.jsonl` (1015 pilot calls appended
+to the 8 pre-existing connectivity-test lines), `pilot/out/observations.jsonl` (40
+observations), `pilot/out/report.md`, `pilot/out/run_log.txt`, and
+`pilot/out/raw.pre_pilot_backup.jsonl` (the 8 pre-pilot lines, kept so pilot-only
+usage can be separated from the totals the built-in summary prints).
+Anthropic pricing filled in ($1.00 in / $5.00 out per Mtok, user-supplied).
+
+**Decided:** *26 calls per (model, task), not 27* — stated and justified before
+spending. There is one code-generation call per (model, task), and that single
+solution is replayed into condition V, condition N and the P4 probe. §9's P4
+compares byte-identical code, and an `Observation` carries one `passes_hidden`, so
+a second generation would give `y_v` and `y_n` different subject matter and
+different ground truths. *Gemini pricing left `None`* on the user's instruction —
+no verified figure, and it will not be guessed; cost is therefore Anthropic-only.
+*Resumability deliberately not built for the pilot* — a re-run costs under a
+dollar. Required before the main experiment (~15,600 calls); logged.
+
+**Did not work:** **`_orient` silently inverted every descending observation, and
+the first report.md was invalid.** `_orient` applied `6 - draw` whenever
+`scale_direction == "descending"`, on the assumption that descending presentation
+reverses the number-to-label mapping. It does not. DESIGN.md §3 fixes the wording
+(`1 = Very unlikely` ... `5 = Very likely`) and randomises only the order the five
+lines are *printed* in, which is what `_scale_block` implements — a reply of `5`
+means "Very likely" under both directions. Subtracting from 6 therefore flipped
+the meaning of half the data. Evidence: on raw draws all **39/39** usable
+observations have cleanly ordered anchors, zero misorderings; after `_orient`, all
+19 descending observations become misordered. The first run reported
+`misorder_rate` 50.0 % / 47.4 % — matching the descending counts (10 and 9)
+exactly — and **P2 and P3 both FAILED, giving a NO-GO.** Corrected numbers:
+`misorder_rate` 0.0 %, `clean_rate` 100 %, and P1–P4 all PASS, **GO**. The
+tell was in the report's own order-effects table: mean self-report 4.16
+(ascending) against 1.66 (descending) after orientation, a 2.5-point gap that
+orientation exists to remove. Raw, those means are 4.16 / 4.20 and 4.34 / 4.49 —
+no material direction effect. `_orient` is now the identity and still validates
+the direction string; direction sensitivity is measured in `_order_effects` by
+comparing raw means, which is what §3 asks for. Re-analysis used the saved
+`observations.jsonl` and cost nothing. No test covered `_orient`; the 27 passing
+tests passed before and after the fix, which is exactly why this survived to a
+live run.
+
+Also did not work: *`MAX_OUTPUT_TOKENS_RATING = 8` truncates Claude mid-sentence
+and the strict parser then discards a rating the model did give.* All 17 of
+Claude's parse failures are of the form `"2\n\nThe solution doesn't handle"` — a
+valid digit followed by prose cut off at the token ceiling. The loss is not
+random: **16 of 17 fall on the low vignette** (`z_lo`), the one question where the
+model wants to explain the bug it found. No observation lost all five draws, so no
+observation was dropped. The parser was left alone deliberately — relaxing it to
+take the leading digit after seeing the data would be fitting the instrument to
+the results.
+
+**State:** `pytest pilot/tests/ -v` passes **27/27**. Zero API errors and zero
+aborted calls across 1015 calls. Claude 520 calls / 230,591 input / 5,472 output
+tokens = **$0.2581**; Gemini 495 calls / 164,899 input / 1,236 output / 12,424
+thought tokens, cost not computable. Gemini made 495 rather than 520 because one
+observation (task 13) failed `_extract_code` and returned after its single
+generation call, skipping the other 25. Verdicts are identical under
+`tie_rule="lower"` and `"upper"`, and `ambiguous_C_rate` is 0.0 %, so the two
+bound choices produce byte-identical C distributions.
+
+Two measurement-quality facts that the thresholds do not capture and that the
+numbers should not be read without: **the scale is saturating at the ceiling.**
+`z_hi` is exactly 5.000 for 39/39 observations, and the condition-V self-report
+`y_v` is exactly 5.000 for 20/20 Claude and 16/19 Gemini observations. Because
+`y_v` and `z_hi` are pinned at the same ceiling, the equality tolerance fired on
+`y == z_hi` in **36 of 39** observations, so `C = 4` for 36 of them and `C` carries
+almost no variation. DESIGN.md §6 predicts the opposite ("means over five draws
+are continuous, which makes exact ties rare"); that prediction assumes the means
+are not both at a boundary. Relatedly, P1 passes at exactly its floor — 3 distinct
+points for both models, with **zero draws at 3 and 4** and the mass at 1, 2 and 5.
+
+Untested: resumability. `analyze.py` has now run on real data, but `_orient`'s
+correction is not covered by a test.
+
+**Next:** decide whether the ceiling saturation is acceptable for the main
+experiment, since it is what determines whether `C` can vary at all — and get a
+regression test around `_orient` before anything else is built on `analyze.py`.
+
+---
+
 # Open Questions
 
 Add anything unresolved. Remove anything answered. This section is the handover
 between sessions.
 
+- **Ceiling saturation is the biggest open risk after the pilot, and no threshold
+  catches it.** `z_hi` was exactly 5.000 in 39/39 observations and `y_v` in 36/39,
+  so the equality tolerance decided `y == z_hi` 36 times and `C = 4` almost
+  everywhere. P2 passes (anchors cleanly ordered) while `C` still carries close to
+  no variation, because the high anchor and the self-report are pinned to the same
+  boundary. Both bound choices give byte-identical C distributions for the same
+  reason. Decide before the main run whether to address it — a harder high
+  vignette, a wider scale, or a task set the models are less confident on — and
+  note that changing the scale reopens the locked 5-point decision, so it needs
+  the user.
+- **`_orient` has no regression test.** It silently inverted every descending
+  observation and produced a false NO-GO on the first run; the fix is a one-liner
+  and nothing in the 27 tests would catch a regression. A test asserting that a
+  descending draw is returned unchanged, and that raw anchor orderings are
+  direction-independent, belongs in `pilot/tests/`.
+- **`MAX_OUTPUT_TOKENS_RATING = 8` costs real measurements, unevenly.** 17 of
+  Claude's rating replies were truncated mid-sentence after a valid leading digit,
+  16 of them on the low vignette. Raising the ceiling would recover them; relaxing
+  the parser to take the leading digit would too, but after seeing the data that
+  is fitting the instrument to the results, so it was not done. Decide before the
+  main run, where the same 3 % loss lands on ~15,600 calls.
+- **P4 (response consistency) passed in the pilot but on a saturated scale.**
+  Signed gaps were -0.320 (Claude) and -0.042 (Gemini), well inside the 0.75
+  threshold. With self- and other-ratings both near the ceiling, the probe had
+  little room to show a gap, so this is weak evidence of consistency rather than
+  strong evidence. Original concern retained below.
 - **P4 (response consistency) is untested and is the assumption most likely to
   fail.** Plisiecki et al. (arXiv:2607.20082) document "attribution gating":
   models treat self-attribution differently from other-attribution. If a model
@@ -380,11 +487,13 @@ between sessions.
   silently invert LOW and HIGH. A `test_vignettes.py` asserting LOW fails and
   HIGH passes against `VIGNETTE_HIDDEN_ASSERTS` would close this; it was left out
   this session only to stay inside the assigned scope.
-- **Resumability is designed for but never tested.** Every call appends to
-  `raw.jsonl` before parsing, but nothing reads that file back to skip work
-  already done — an interrupted run currently restarts from zero and pays twice.
-  With 1040 planned calls this matters. Decide before the real run whether to add
-  resume-from-`raw.jsonl` or to accept the risk.
+- **Resumability is REQUIRED before the main experiment (~15,600 calls).** Decided
+  2026-08-14: deliberately not built for the pilot, because a re-run costs under a
+  dollar. Every call already appends to `raw.jsonl` before parsing, but nothing
+  reads that file back to skip completed work, so an interrupted run restarts from
+  zero. At main-experiment scale that is no longer an acceptable loss, and the
+  append-immediately log is only half a resume mechanism until something consumes
+  it.
 - **CLAUDE.md's Commands block says `pytest tests/ -v`; the real path is
   `pytest pilot/tests/ -v`.** Left unedited because CLAUDE.md is the user's
   control document — worth a one-character fix by the user.
@@ -404,9 +513,19 @@ between sessions.
   reply would surface as an `_extract_code` failure, i.e. as apparent model
   incompetence rather than as a config problem. `code_extraction_failure_rate` is
   in the report for exactly this reason; check it first if it is non-zero.
-- **`PRICE_PER_MTOK_USD` is `None` for both models.** No cost figure can be
-  reported until the user fills these in from the providers' current pricing
-  pages. Token counts are printed regardless.
+- **`PRICE_PER_MTOK_USD` is set for Anthropic ($1.00 in / $5.00 out per Mtok,
+  user-supplied 2026-08-14) and deliberately still `None` for Gemini** — the user
+  has no verified figure and will not guess. Any total cost reported is therefore
+  Anthropic-only; Gemini appears as token counts. Fill in before the main
+  experiment, where spend actually matters.
+- **DESIGN.md §4's condition-N wording implies a second code-generation call.**
+  Step 1 reads "Coding task → model writes a solution", but the implementation
+  generates one solution per (model, task) and replays it into V, N and the P4
+  probe — forced by §9's byte-identical requirement, and necessary so that `y_v`
+  and `y_n` rate the same code against the same ground truth. §4 also gives the
+  visible assert to V's step 1 but not N's, whereas the implementation sends the
+  identical prompt in both, so the conditions differ only in the vignettes. Both
+  are wording fixes for the user to make in §4; the code is not changing.
 - **The full multi-turn DESIGN.md §4 flow (vignettes + self-question replayed
   in one context) is untested.** Only single-turn rating questions have been
   run so far. `elicit.py`'s Gemini path builds this via explicit
