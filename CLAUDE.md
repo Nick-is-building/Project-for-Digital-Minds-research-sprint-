@@ -30,6 +30,25 @@ and ask.
 
 ---
 
+## API facts (verified 2026-08-14)
+
+**Google / Gemini**
+- Use the Interactions API: `POST /v1beta/interactions` via `client.interactions.create`
+  (native `google-genai` SDK, v2.0.0+; installed: 2.18.1). Auth header `x-goog-api-key`.
+- Do NOT use the OpenAI-compatibility layer — it rejects the new `AQ.`-prefix keys.
+- API keys: legacy `AIza...` ("Standard") keys are being phased out — unrestricted
+  ones rejected since 2026-06-19, all rejected from Sept 2026. New AI Studio keys
+  are `AQ.Ab...` ("Auth") keys by default. This is expected, not an error.
+- Model in use: `gemini-3.6-flash`. Use `thinking_level` (`minimal`/`low`/`medium`/
+  `high`), never `thinking_budget` — sending both is a 400 error.
+- Leave temperature/top_p/top_k at defaults (temp 1.0) — Gemini 3.x is tuned for
+  them; this also matches our locked temperature=1.0 decision.
+
+**Anthropic**
+- Keys start with `sk-ant-api03-`. Extended thinking is off by default; leave it off.
+
+---
+
 ## What this project is
 
 We test whether **anchoring vignettes** (King & Wand 2007) can correct the

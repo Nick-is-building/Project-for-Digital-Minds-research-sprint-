@@ -22,10 +22,11 @@ SANDBOX_TMP_DIR = PILOT_DIR / ".sandbox_tmp"
 # tier to keep pilot cost low (20 tasks x 2 models x several samples each).
 # Cross-provider diversity is kept per the locked "API models only" decision;
 # capability spread within this pair is secondary to cost control for the
-# pilot specifically.
+# pilot specifically. GOOGLE_MODEL uses the Interactions API (see CLAUDE.md
+# "API facts") via client.interactions.create, not client.models.generate_content.
 
 ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
-GOOGLE_MODEL = "gemini-2.5-flash"
+GOOGLE_MODEL = "gemini-3.6-flash"
 PILOT_MODELS = (ANTHROPIC_MODEL, GOOGLE_MODEL)
 
 # --- Elicitation (DESIGN.md §6) --------------------------------------------
@@ -33,6 +34,22 @@ PILOT_MODELS = (ANTHROPIC_MODEL, GOOGLE_MODEL)
 N_SAMPLES = 5
 TEMPERATURE = 1.0
 API_TIMEOUT_SECONDS = 30
+
+# Rating calls (vignette/self/other) expect a single digit; cap tokens so a
+# malformed, rambling answer doesn't get billed at length. Code-generation
+# calls use the larger default instead.
+MAX_OUTPUT_TOKENS_RATING = 8
+MAX_OUTPUT_TOKENS_DEFAULT = 1024
+
+# Lowest available Gemini 3.x thinking level (see CLAUDE.md "API facts").
+# Applied to rating calls only — rating a 5-point scale is classification,
+# not a task that benefits from extended thinking. Code generation keeps
+# the model's default thinking level.
+GOOGLE_RATING_THINKING_LEVEL = "minimal"
+
+# Hard ceiling on total API calls made in one process, across both providers.
+# Guards against a runaway loop silently burning budget.
+MAX_CALLS = 1200
 
 # --- Rating scale (DESIGN.md §3) --------------------------------------------
 
