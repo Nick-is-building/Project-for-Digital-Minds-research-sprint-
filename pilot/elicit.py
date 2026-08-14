@@ -136,6 +136,54 @@ def _append_raw_line(record: dict) -> None:
         f.write(json.dumps(record) + "\n")
 
 
+def parse_rating(text: str | None) -> int | None:
+    """Strict parse of a rating reply: a bare integer, or None."""
+    return _parse_integer(text)
+
+
+def elicit_text(
+    model: str,
+    messages: list[dict],
+    is_rating: bool = False,
+    sample_index: int = 0,
+) -> str | None:
+    """One call; returns the raw response text, or None if the call failed.
+
+    Used where the reply is not a rating (code generation) and where a reply
+    must be replayed verbatim as an assistant turn in a longer context, which
+    `str(parsed_integer)` would not preserve. Logs to raw.jsonl exactly as
+    `elicit` does.
+
+    Raises CallBudgetExceeded if config.MAX_CALLS would be exceeded.
+    """
+    _check_call_budget()
+
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "model": model,
+        "sample_index": sample_index,
+        "is_rating": is_rating,
+        "messages": messages,
+    }
+    try:
+        raw_text, usage = _raw_call(model, messages, is_rating)
+        record["raw_response"] = raw_text
+        record["error"] = None
+        record["input_tokens"] = usage.input_tokens
+        record["output_tokens"] = usage.output_tokens
+        record["thought_tokens"] = usage.thought_tokens
+    except Exception as exc:
+        raw_text = None
+        record["raw_response"] = None
+        record["error"] = repr(exc)
+        record["input_tokens"] = None
+        record["output_tokens"] = None
+        record["thought_tokens"] = None
+
+    _append_raw_line(record)
+    return raw_text
+
+
 def elicit(
     model: str,
     messages: list[dict],
@@ -152,36 +200,10 @@ def elicit(
     Raises CallBudgetExceeded if config.MAX_CALLS would be exceeded; already-
     made calls in this batch remain logged.
     """
-    results: list[int | None] = []
-    for sample_index in range(n_samples):
-        _check_call_budget()
-
-        record = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "model": model,
-            "sample_index": sample_index,
-            "is_rating": is_rating,
-            "messages": messages,
-        }
-        try:
-            raw_text, usage = _raw_call(model, messages, is_rating)
-            record["raw_response"] = raw_text
-            record["error"] = None
-            record["input_tokens"] = usage.input_tokens
-            record["output_tokens"] = usage.output_tokens
-            record["thought_tokens"] = usage.thought_tokens
-        except Exception as exc:
-            raw_text = None
-            record["raw_response"] = None
-            record["error"] = repr(exc)
-            record["input_tokens"] = None
-            record["output_tokens"] = None
-            record["thought_tokens"] = None
-
-        _append_raw_line(record)
-        results.append(_parse_integer(raw_text))
-
-    return results
+    return [
+        _parse_integer(elicit_text(model, messages, is_rating, sample_index))
+        for sample_index in range(n_samples)
+    ]
 
 
 def print_usage_summary() -> None:

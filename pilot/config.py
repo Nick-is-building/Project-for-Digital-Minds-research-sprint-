@@ -51,6 +51,22 @@ GOOGLE_RATING_THINKING_LEVEL = "minimal"
 # Guards against a runaway loop silently burning budget.
 MAX_CALLS = 1200
 
+# Seed for the per-context randomisation of scale direction and vignette order
+# (DESIGN.md §3, §4). Fixed so a run is reproducible; the drawn values are
+# recorded per observation regardless.
+PILOT_RANDOM_SEED = 20260814
+
+# USD per million tokens, per model. NOT FILLED IN: these must be copied from
+# each provider's current pricing page before any cost figure is reported.
+# Deliberately left as None rather than guessed — a wrong constant here would
+# silently misreport spend, and gemini-3.6-flash pricing in particular is newer
+# than this assistant's training data. run_pilot prints token counts either way
+# and says which prices are missing.
+PRICE_PER_MTOK_USD: dict[str, dict[str, float | None]] = {
+    ANTHROPIC_MODEL: {"input": None, "output": None},
+    GOOGLE_MODEL: {"input": None, "output": None},
+}
+
 # --- Rating scale (DESIGN.md §3) --------------------------------------------
 
 SCALE_POINTS = {
@@ -74,6 +90,27 @@ ANSWER_INSTRUCTION = "Reply with the number only."
 # --- Rescaling tolerance (DESIGN.md §5) -------------------------------------
 
 TOLERANCE = 0.01
+
+# --- Scale direction (DESIGN.md §3) -----------------------------------------
+# Randomised per context and recorded, so label-order sensitivity is measured
+# rather than silently absorbed. Ratings given under DESCENDING presentation
+# must be re-oriented before they are averaged with ascending ones — see
+# analyze._orient.
+
+SCALE_ASCENDING = "ascending"
+SCALE_DESCENDING = "descending"
+SCALE_DIRECTIONS = (SCALE_ASCENDING, SCALE_DESCENDING)
+
+# --- Pilot pass/fail thresholds (DESIGN.md §9) ------------------------------
+# Fixed before the numbers were seen. GO requires P1, P2 and P3; P4 failing
+# does not block the main experiment but must be reported as a named limitation.
+
+P1_MIN_DISTINCT_SCALE_POINTS = 3
+P1_MIN_SD = 0.3
+P2_MAX_MISORDER_RATE = 0.20
+P2_MAX_TIE_RATE = 0.40
+P3_MIN_SCALE_POINT_DIFFERENCE = 0.5
+P4_MAX_ABS_GAP = 0.75
 
 # --- Tasks -------------------------------------------------------------------
 
