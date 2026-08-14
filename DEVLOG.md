@@ -783,6 +783,109 @@ own clearly-labeled pilot variant, once a session is authorized to start it.
 
 ---
 
+## 2026-08-14 22:33 — Sonnet (claude-sonnet-5, Claude Code)
+
+**Built:** The 0-100 scale control experiment authorized this session as a
+one-off diagnostic exception to CLAUDE.md's locked "exactly 5 scale points"
+decision (DESIGN.md §3 unchanged; the 5-point pilot's data untouched).
+`run_control_scale100.py` (new, project root): monkeypatches
+`pilot.config.SCALE_POINTS`, `ANSWER_INSTRUCTION`, `MAX_OUTPUT_TOKENS_RATING`
+and `RAW_JSONL_PATH` at process start, then drives the run entirely through
+`run_pilot.py`'s own unmodified `_run_observation`, `_dry_run`,
+`_walk_condition_v`, `_planned_calls`, `_print_cost_summary` — the turn-
+sequencing logic already validated in the two real pilot runs cannot drift
+between the two scripts because there is only one copy of it. Wrote its own
+`_append_observation` and `render_report`/`write_report` (does not import or
+call any of `analyze.py`'s P1-P4 functions). Output kept fully separate:
+`pilot/out/raw_scale100.jsonl`, `observations_scale100.jsonl`,
+`report_scale100.md`, `run_log_scale100.txt`. `pilot/out/raw.jsonl`,
+`observations.jsonl`, `report.md` (the 5-point run) were never opened for
+writing this session — sizes/timestamps confirmed unchanged before and after.
+
+**Decided:**
+
+- *`SCALE_POINTS_WIDE = {0: "Very unlikely", 100: "Very likely"}`* — two
+  labelled endpoints, not a fully enumerated 0-100 dict. This incidentally
+  solves the "101-line legend" problem named in this session's task brief:
+  since `run_pilot.py`'s `_scale_block` iterates `sorted(config.SCALE_POINTS)`
+  and that dict now has 2 keys, the legend prints 2 lines with no change to
+  `run_pilot.py` itself. Direction randomisation (DESIGN.md §3) still applies
+  to which of the two lines prints first.
+- *`ANSWER_INSTRUCTION` reworded from "a single digit" to "a single integer
+  from 0 to 100"* — flagged to the user before running: the literal 5-point
+  wording would have capped every reply at 0-9 and silently defeated the
+  point of the control. Confirmed with the user as a deliberate deviation
+  that preserves the instruction's strict, no-prose intent rather than its
+  digit count.
+- *`MAX_OUTPUT_TOKENS_RATING` raised from 8 to 16 for this script only*, per
+  the user — headroom for a multi-digit reply plus tokenisation overhead, not
+  a parser relaxation. `elicit.parse_rating` is untouched and still strict.
+- *`TOLERANCE` for the near-ceiling share is 0.25, not the 5-point run's
+  0.01* — the proportional equivalent on a width-100 scale (`0.01 * 100/4`),
+  per the user's instruction, stated in the report itself.
+- *`analyze.py`'s `_c_distribution`/P1-P4 machinery is not touched or
+  imported for analysis* — only `analyze.Observation` (the dataclass) is
+  reused, for serialization. No `compute_C` call, no threshold check anywhere
+  in this script. `analyze.py`'s module-level `_MIN_POINT`/`_MAX_POINT`
+  (computed from `config.SCALE_POINTS` at import time, before this script's
+  override runs) are consequently stale at 1/5 for the rest of the process,
+  but nothing in this script reads them.
+- *Reused `run_pilot._run_observation` and `_dry_run` unmodified* rather than
+  writing parallel versions, specifically to avoid re-introducing the
+  condition-V sequencing bug the 2026-08-14 entry ("Claude Opus 4.7") already
+  fixed and verified once.
+
+**Did not work:** Nothing failed. Zero parse failures and zero off-scale
+draws across all 4 (model, task-set) groups (see numbers below) — the
+reworded instruction held up cleanly on the wide scale too, on the first
+attempt, with no relaxation of `parse_rating`.
+
+**State:** `python3 run_control_scale100.py --dry-run` printed the corrected
+2-line endpoints legend and confirmed 1040 planned calls (identical to the
+5-point pilot's budget), within `MAX_CALLS`=1200. The real run made 965 calls
+(520 claude, 445 gemini — 3 gemini LBPP tasks lost to code-extraction failure,
+skipping their 25 downstream calls each: `520 - 3*25 = 445`, exactly). Cost:
+claude-haiku $0.3277 (296,853 in / 6,168 out tokens); gemini has no configured
+price, 198,883 in / 1,970 out / 15,783 thought tokens, reported as tokens
+only. Under the $1 budget on the priced side.
+
+Numbers as requested, per model and per task set, uninterpreted (full detail
+in `pilot/out/report_scale100.md`):
+
+| Group | n | distinct y | distinct z_lo | distinct z_hi | y min/max/mean/sd | share \|y-z_hi\|<=0.25 |
+|---|---|---|---|---|---|---|
+| claude · mbpp | 10 | 4 | 4 | 6 | 92.000 / 95.000 / 92.540 / 1.037 | 0.300 |
+| claude · lbpp | 10 | 6 | 5 | 4 | 89.800 / 94.400 / 92.520 / 1.347 | 0.500 |
+| gemini · mbpp | 10 | 2 | 1 | 1 | 80.000 / 100.000 / 98.000 / 6.325 | 0.900 |
+| gemini · lbpp | 7 | 1 | 1 | 1 | 100.000 / 100.000 / 100.000 / 0.000 | 1.000 |
+
+y distributions (sorted, per-observation mean of 5 draws):
+- claude · mbpp: [92.0, 92.0, 92.0, 92.0, 92.0, 92.0, 92.0, 92.6, 93.8, 95.0]
+- claude · lbpp: [89.8, 91.6, 92.0, 92.0, 92.6, 92.6, 92.6, 93.2, 94.4, 94.4]
+- gemini · mbpp: [80.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0]
+- gemini · lbpp: [100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0]
+
+z_lo distributions (sorted): claude · mbpp [15,15,15,15,15,17,17,19,19,21];
+claude · lbpp [15,15,15,15,15,17,17,19,21,25]; gemini · mbpp all 0.0 (n=10);
+gemini · lbpp all 0.0 (n=7).
+
+z_hi distributions (sorted): claude · mbpp [91.2,92.0,92.6,92.6,92.6,92.6,
+92.6,93.8,94.4,95.0]; claude · lbpp [91.8,92.6,92.6,93.2,93.2,93.2,93.2,93.2,
+93.2,94.4]; gemini · mbpp all 100.0 (n=10); gemini · lbpp all 100.0 (n=7).
+
+Parse failures: 0 for both models, both task sets (250 rating draws per
+claude group, 250/175 per gemini group). Off-scale draws: 0 throughout.
+
+Untested / not done, deliberately: no P1-P4 verdict, no `compute_C`, no
+cross-run statistical comparison against the 5-point pilot's numbers. Not
+started: anything paper-facing that interprets these numbers.
+
+**Next:** None assigned. This was a bounded diagnostic run; per this
+session's explicit instruction, print the numbers, log them, commit, and
+stop — not the researcher's job to interpret them in this session.
+
+---
+
 # Open Questions
 
 Add anything unresolved. Remove anything answered. This section is the handover
@@ -812,6 +915,17 @@ between sessions.
   heavy tasks specifically designed to induce doubt, or accepting saturation as
   a reportable finding about these models rather than something to engineer
   away.
+- **The 0-100 scale control (2026-08-14 22:33 entry) has been run; numbers are
+  in `pilot/out/report_scale100.md`, not yet interpreted.** Raw facts only,
+  per that entry: on the wide scale, claude's `y` took 4 (mbpp) / 6 (lbpp)
+  distinct values in the 89.8-95.0 range (not a single collapsed value, not
+  spread across 0-100 either); gemini's `y` was constant at exactly 100.0 on
+  lbpp (7/7 usable) and 100.0 in 9/10 mbpp observations (one at 80.0), with
+  `z_lo` constant at exactly 0.0 for gemini in every usable observation on
+  both task sets. Zero parse failures, zero off-scale draws. Whether this
+  rules in or out "scale coarseness" as the explanation for the 5-point run's
+  saturation is an open interpretive question for the write-up, not decided
+  here.
 - **P1 does not catch collapse to the endpoints.** It passed at its floor: 3
   distinct points, zero draws at 3 and 4, mass at 1, 2 and 5. It was written to
   catch collapse to a single value. Consider adding an interior-use or
