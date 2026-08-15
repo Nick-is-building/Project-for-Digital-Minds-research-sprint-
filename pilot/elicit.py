@@ -57,6 +57,11 @@ class CallResult:
     output_tokens: int | None
     thought_tokens: int | None = None
     cached_input_tokens: int | None = None
+    # Tokens written to the cache, billed at the write multiplier. Kept separate
+    # from cached_input_tokens (reads, billed at 0.1x) because the two are priced
+    # differently and only their difference says whether caching paid for itself.
+    # Anthropic reports both; Google's implicit caching reports reads only.
+    cache_creation_tokens: int | None = None
     stop_reason: str | None = None
     truncated: bool = False
 
@@ -133,25 +138,53 @@ def _anthropic_messages(messages: list[dict], cache_prefix: bool) -> list[dict]:
     ]
 
 
+def _first_text(content) -> str:
+    """The first text block, or "" — never `content[0].text`.
+
+    claude-opus-5 emits a thinking block ahead of its answer on a minority of
+    calls even with no thinking requested, so indexing block 0 raises
+    AttributeError non-deterministically. It did, on 52 of 128 smoke-test calls.
+    """
+    for block in content or ():
+        if getattr(block, "type", None) == "text":
+            return block.text
+    return ""
+
+
 def _call_anthropic(
-    model: str, messages: list[dict], max_output_tokens: int, cache_prefix: bool
+    model: str,
+    messages: list[dict],
+    max_output_tokens: int,
+    cache_prefix: bool,
+    is_rating: bool,
 ) -> CallResult:
     import anthropic
 
     client = anthropic.Anthropic(timeout=config.API_TIMEOUT_SECONDS)
+    # Extended thinking is turned off explicitly on rating calls rather than
+    # left at the default. On claude-opus-5 the default produced a thinking
+    # block on ~40% of rating calls, and against an 8-token cap the block
+    # consumed the whole budget, so the call returned no digit at all. That is
+    # the parse-failure mode the ANSWER_INSTRUCTION fix already closed once.
+    # Placing a point on an ordinal scale is classification; this mirrors
+    # config.GOOGLE_RATING_THINKING_LEVEL, which does the same for Gemini, and
+    # leaves code generation at each model's default.
+    extra: dict = {"thinking": {"type": "disabled"}} if is_rating else {}
     response = client.messages.create(
         model=model,
         max_tokens=max_output_tokens,
         temperature=config.TEMPERATURE,
         messages=_anthropic_messages(messages, cache_prefix),
+        **extra,
     )
     usage = response.usage
-    text = response.content[0].text if response.content else ""
+    text = _first_text(response.content)
     return CallResult(
         text=text,
         input_tokens=usage.input_tokens,
         output_tokens=usage.output_tokens,
         cached_input_tokens=getattr(usage, "cache_read_input_tokens", None),
+        cache_creation_tokens=getattr(usage, "cache_creation_input_tokens", None),
         stop_reason=response.stop_reason,
         truncated=response.stop_reason == "max_tokens",
     )
@@ -214,7 +247,9 @@ def _raw_call(
 ) -> CallResult:
     provider = config.PROVIDER.get(model)
     if provider == config.ANTHROPIC:
-        return _call_anthropic(model, messages, max_output_tokens, cache_prefix)
+        return _call_anthropic(
+            model, messages, max_output_tokens, cache_prefix, is_rating
+        )
     if provider == config.GOOGLE:
         # Gemini implicit caching is on by default for all 3.x models and needs
         # no request-side flag, so `cache_prefix` has nothing to apply here.
@@ -273,6 +308,7 @@ def elicit_call(
     record["output_tokens"] = result.output_tokens
     record["thought_tokens"] = result.thought_tokens
     record["cached_input_tokens"] = result.cached_input_tokens
+    record["cache_creation_tokens"] = result.cache_creation_tokens
     record["stop_reason"] = result.stop_reason
     record["truncated"] = result.truncated
 
@@ -336,6 +372,7 @@ def print_usage_summary() -> None:
             "output_tokens": 0,
             "thought_tokens": 0,
             "cached_input_tokens": 0,
+            "cache_creation_tokens": 0,
             "truncated": 0,
             "errors": 0,
         }
@@ -355,6 +392,7 @@ def print_usage_summary() -> None:
                 "output_tokens",
                 "thought_tokens",
                 "cached_input_tokens",
+                "cache_creation_tokens",
             ):
                 model_totals[field] += record.get(field) or 0
             model_totals["truncated"] += 1 if record.get("truncated") else 0
@@ -363,8 +401,25 @@ def print_usage_summary() -> None:
     print(f"--- Usage summary ({_raw_path}) ---")
     for model, t in totals.items():
         print(
-            f"{model}: {t['calls']} calls, {t['input_tokens']} input "
-            f"({t['cached_input_tokens']} cached), {t['output_tokens']} output, "
-            f"{t['thought_tokens']} thought, {t['truncated']} truncated, "
-            f"{t['errors']} errors"
+            f"{model}: {t['calls']} calls, {t['input_tokens']} input, "
+            f"{t['output_tokens']} output, {t['thought_tokens']} thought, "
+            f"{t['truncated']} truncated, {t['errors']} errors"
         )
+    print()
+    print("--- Cache tokens actually reported by the provider ---")
+    print(
+        "Reads are billed at 0.1x the input price and writes at 1.25x, so a model "
+        "with writes and no reads paid a premium for nothing."
+    )
+    for model, t in totals.items():
+        written = t["cache_creation_tokens"]
+        read = t["cached_input_tokens"]
+        minimum = config.CACHE_MIN_PROMPT_TOKENS.get(model)
+        note = ""
+        if written == 0 and read == 0:
+            note = (
+                f"  (no prompt reached this model's {minimum}-token minimum)"
+                if minimum
+                else "  (nothing cached)"
+            )
+        print(f"{model}: {written} written, {read} read{note}")

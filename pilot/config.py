@@ -35,6 +35,19 @@ MAIN_REPORT_PATH = OUT_DIR / "main_report.md"
 # pilot/resume.py.
 MAIN_SOLUTIONS_PATH = OUT_DIR / "main_solutions.jsonl"
 
+# The smoke test writes to its own files. It deliberately interrupts and resumes
+# a run, and its data must not land where the real run would then treat those
+# cells as finished.
+SMOKE_RAW_JSONL_PATH = OUT_DIR / "smoke_raw.jsonl"
+SMOKE_OBSERVATIONS_PATH = OUT_DIR / "smoke_observations.jsonl"
+SMOKE_SOLUTIONS_PATH = OUT_DIR / "smoke_solutions.jsonl"
+
+# The model the smoke test drives end to end. claude-opus-5 rather than the
+# cheapest model because it is the only one whose cache minimum this workload
+# clears, so it is the only cell that can demonstrate the cache accounting is
+# real rather than estimated.
+SMOKE_MODEL = "claude-opus-5"
+
 # --- Providers and models ----------------------------------------------------
 # DESIGN.md does not fix model identifiers (see DEVLOG.md Open Questions).
 #
@@ -54,22 +67,30 @@ ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 GOOGLE_MODEL = "gemini-3.6-flash"
 PILOT_MODELS = (ANTHROPIC_MODEL, GOOGLE_MODEL)
 
-# The main experiment's model set. Four are fixed; the fifth is the user's call
-# after seeing the cost estimate (see DEVLOG). Candidates and their marginal
-# cost are printed by run_main.py --estimate.
+# The main experiment's model set, final as of 2026-08-15 (user's decision).
+# Every string here was checked against client.models.list() on this account
+# before the run; a model that does not resolve is a stop, never a silent
+# fallback to a neighbouring version.
+#
+# Two changes from the earlier four-model list, each for a stated reason:
+#   - claude-sonnet-5 replaces claude-sonnet-4-6: current generation, and
+#     cheaper ($2/$10 per MTok against $3/$15).
+#   - claude-opus-5 fills the fifth slot (DESIGN.md §10 wants five models). It
+#     is the current flagship, and the only model in this set whose cache
+#     minimum (512 tokens) is low enough for this workload's ~1,150-token
+#     reused prefix to clear — see CACHE_MIN_PROMPT_TOKENS below.
 MAIN_MODELS = (
     "claude-haiku-4-5-20251001",
-    "claude-sonnet-4-6",
+    "claude-sonnet-5",
+    "claude-opus-5",
     "gemini-3.6-flash",
     "gemini-3.1-pro-preview",
 )
 
-# The fifth slot. Adding either to MAIN_MODELS is the only change needed; the
-# marginal cost of each is printed by `run_main.py --estimate`.
-MAIN_MODEL_CANDIDATES = ("claude-opus-4-7", "gemini-3.7-flash")
-
 PROVIDER: dict[str, str] = {
     "claude-haiku-4-5-20251001": ANTHROPIC,
+    "claude-sonnet-5": ANTHROPIC,
+    "claude-opus-5": ANTHROPIC,
     "claude-sonnet-4-6": ANTHROPIC,
     "claude-opus-4-7": ANTHROPIC,
     "gemini-3.6-flash": GOOGLE,
@@ -140,9 +161,20 @@ MAIN_RANDOM_SEED = 20260815
 #     the low tier is the one that applies.
 #   - Claude 4.7+ uses a newer tokenizer that produces roughly 30% more tokens
 #     for the same text, so a Claude token count is not comparable to a Gemini
-#     one at equal text length.
+#     one at equal text length. claude-sonnet-5 and claude-opus-5 are in that
+#     generation while CHARS_PER_TOKEN[ANTHROPIC] was measured on Haiku 4.5, so
+#     the estimate understates their token counts (and cost).
+#   - claude-sonnet-5's $2/$10 was introductory pricing; Anthropic's page now
+#     states it is the standard price and the increase to $3/$15 scheduled for
+#     2026-09-01 will not take effect.
+#
+# `cache_read` is the per-MTok price of a cache hit where it is published, so
+# run_pilot.cost_of does not have to derive it from a multiplier. It is only
+# given for the two models whose minimum this workload can actually clear.
 PRICE_PER_MTOK_USD: dict[str, dict[str, float | None]] = {
     "claude-haiku-4-5-20251001": {"input": 1.00, "output": 5.00},
+    "claude-sonnet-5": {"input": 2.00, "output": 10.00, "cache_read": 0.20},
+    "claude-opus-5": {"input": 5.00, "output": 25.00, "cache_read": 0.50},
     "claude-sonnet-4-6": {"input": 3.00, "output": 15.00},
     "claude-opus-4-7": {"input": 5.00, "output": 25.00},
     "gemini-3.6-flash": {"input": 0.75, "output": 3.75},
@@ -157,11 +189,20 @@ PRICE_PER_MTOK_USD: dict[str, dict[str, float | None]] = {
 # These minimums, not the code, decide whether caching does anything here. A
 # prompt below its model's minimum is processed uncached with no error and no
 # write premium even when it is marked with cache_control, so requesting a
-# breakpoint is free. Only claude-sonnet-4-6's 1,024 is low enough for this
-# workload's reused prompts (~1,150 tokens) to clear it — see
-# `run_main.py --estimate`.
+# breakpoint is free — which is why caching stays on for every model.
+#
+# Of the five configured models, this workload's reused prefix (~1,150 tokens)
+# clears only claude-opus-5's 512 and claude-sonnet-5's 1,024. Haiku 4.5 (4,096)
+# and every Gemini (4,096) never cache at all here. Caching is therefore
+# near-worthless on this run rather than the two-thirds saving it would be on a
+# long-prefix workload: the reused prefix is small, and by design only one
+# condition-V call in three is even reusable, because the later turns replay each
+# thread's own ratings and that priming IS the King & Wand mechanism. See
+# `run_main.py --estimate` for the measured figure.
 CACHE_MIN_PROMPT_TOKENS: dict[str, int] = {
     "claude-haiku-4-5-20251001": 4096,
+    "claude-sonnet-5": 1024,
+    "claude-opus-5": 512,
     "claude-sonnet-4-6": 1024,
     "claude-opus-4-7": 2048,
     "gemini-3.6-flash": 4096,
@@ -403,8 +444,15 @@ NUM_MBPP_TASKS = 10
 NUM_LBPP_TASKS = 10
 
 # Main experiment: 30 + 30. DESIGN.md §10 specifies 100 tasks (simulation: 98%
-# of runs positive at 100, 93% at 60); 60 is the user's instruction for this run
-# and is logged as a deviation in DEVLOG Open Questions, not silently applied.
+# of runs positive at 100, 93% at 60); 60 is the user's decision of 2026-08-15,
+# logged as a deviation in DEVLOG, not silently applied.
+#
+# The reason 60 is enough is that the 100-task figure came from a power analysis
+# for the across-model correlation, and that analysis is no longer the primary
+# one. The correlation is now secondary and will only include models that pass
+# the validity screen (DESIGN.md §9) — possibly three of five — and no number of
+# tasks can rescue a correlation computed over three points. The primary result
+# is the per-cell distribution of y, for which 60 tasks per cell is ample.
 NUM_MBPP_TASKS_MAIN = 30
 NUM_LBPP_TASKS_MAIN = 30
 MBPP_MIN_ASSERTS = 3  # keep only MBPP tasks with >= 3 asserts (1 visible + rest hidden)

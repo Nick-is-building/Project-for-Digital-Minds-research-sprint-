@@ -114,7 +114,7 @@ ask the user**. Do not silently substitute an alternative.
 
 | Decision | Why |
 |---|---|
-| Exactly 5 scale points, fixed wording | Wang, Zhou & Liu (arXiv:2608.08869): all 10 frontier models sensitive to label/demonstration order; corrections unreliable; **lower cardinality** was the only consistent fix. |
+| ~~Exactly 5 scale points~~ → **three scale formats (p5, p7, s100), fixed wording, format is an experimental variable** (revised 2026-08-15) | Wang, Zhou & Liu (arXiv:2608.08869) found lower cardinality the only consistent fix for label-order sensitivity, which is why p5 remains and is run first, unchanged. But our own 0-100 control run showed 5 points destroy the signal: Claude's `y` spans 89.8-95.0 with 4-6 distinct values on 0-100 and is pinned at 5.0 on p5. Wang et al. measured **stability**; we hit a **resolution** ceiling. Both are real and they pull opposite ways, so the cardinality is now measured instead of assumed. **See DESIGN.md §3, which states the tension explicitly.** The wording is unchanged across p5 and p7, so a difference between them is cardinality and not instruction. |
 | Exactly 2 vignettes, not 3 | PISA (He et al. 2017): 74–82 % clean orderings with 2 vignettes vs 63–72 % with 3. |
 | Vignettes before self-assessment, as **separate** questions | King & Wand (2007): prior vignettes unify scale use (this is the mechanism). Merging them into one comparison question produces inconsistent, less informative responses. |
 | Parallel question wording for vignette and self | Any asymmetry beyond the self/other pronoun manufactures a response-consistency violation for purely linguistic reasons. |
@@ -124,7 +124,7 @@ ask the user**. Do not silently substitute an alternative.
 | No Brier score, no ECE, ever | Verified artifact: in a pure-noise world where the self-report carries zero information, Brier "improved" 0.3577 → 0.3016 purely because rescaling re-centres values on the base rate. |
 | No LLM-as-judge anywhere in the measurement path | Ground truth is execution only. This is a stated strength of the design and the sprint's mandatory appendix asks for exactly this. |
 | Do not import, vendor, or copy from `ast-guard` | The user's separate repo. Build fresh. It may be consulted for *how* to sandbox safely, nothing else. |
-| Main experiment: 5 models × 100 tasks | Simulation: 5 models → effect positive in 100 % of runs; 3 models → only 90 %. 100 tasks → 98 %; 60 tasks → 93 %. |
+| Main experiment: **5 models × 60 tasks** × 3 scale formats (task count revised 2026-08-15) | 5 models stands: simulation gives the effect positive in 100 % of runs at 5 models against 90 % at 3. The task count drops from 100 to 60 (simulation: 98 % vs 93 %) because the 100-task figure was powered for the **across-model correlation**, which is now the *secondary* analysis and will only include models passing the validity screen — possibly three of five. No task count rescues a correlation over three points. The primary result is the per-cell distribution of `y`, for which 60 is ample. |
 
 ---
 
@@ -222,15 +222,23 @@ squash, or amend commits — the honest timestamps are worth more than a clean l
 
 ---
 
-## Scope boundary
+## Scope boundary (updated 2026-08-15)
 
-Right now we are building **the pilot only**: a go/no-go instrument check on
-2 models × 20 tasks. It answers whether four assumptions hold (see DESIGN.md §9).
-It does not answer the research question, and no result from it should be
-described as a finding.
+**The pilot has returned its verdict and the main experiment is authorised.**
 
-Do not build the main experiment, expand the model list, add analysis beyond
-DESIGN.md §9, or write anything paper-facing until the pilot has returned a GO.
+The pilot was a go/no-go instrument check on 2 models × 20 tasks against the four
+assumptions in DESIGN.md §9. What it established is listed below under "What the
+pilots established"; the decisive finding is that saturation is a scale-format
+artifact for one model and intrinsic for the other, which is why scale format is
+now an experimental variable rather than a fixed choice.
+
+In scope now: the main experiment (`run_main.py`) — 5 models × 60 tasks × 3 scale
+formats, the validity screen, and the analysis in DESIGN.md §9 extended per
+format. Still out of scope without asking: analysis beyond DESIGN.md §9, and any
+change to a locked decision below.
+
+No pilot number is a finding. The pilot's role in the write-up is instrument
+validation and the "what didn't work" section, nothing more.
 
 ---
 

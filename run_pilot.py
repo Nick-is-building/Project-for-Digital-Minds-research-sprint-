@@ -330,14 +330,24 @@ def append_observation(obs: analyze.Observation, path) -> None:
 # --- Reporting --------------------------------------------------------------
 
 
-def cost_of(model: str, input_tokens: int, output_tokens: int, cached_tokens: int = 0) -> float | None:
+def cost_of(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cached_tokens: int = 0,
+    written_tokens: int = 0,
+) -> float | None:
     """USD for one model's token totals, or None if it has no configured price.
 
     `output_tokens` must already include Gemini thought tokens: the provider
     bills thinking as output, so excluding them understates spend.
-    `cached_tokens` are cache *reads*, priced at the cache-read rate where one is
-    configured and at the full input rate otherwise, which over- rather than
-    under-states the bill.
+
+    The three input quantities are disjoint and priced differently. Anthropic's
+    `input_tokens` counts only uncached tokens — cache reads and cache writes are
+    reported in their own fields and must be added, or a cached run looks cheaper
+    than it was. `cached_tokens` (reads) use the configured cache-read price, or
+    the full input price where none is published, which over- rather than
+    under-states. `written_tokens` are charged the write multiplier.
     """
     prices = config.PRICE_PER_MTOK_USD.get(model, {})
     price_in, price_out = prices.get("input"), prices.get("output")
@@ -346,10 +356,13 @@ def cost_of(model: str, input_tokens: int, output_tokens: int, cached_tokens: in
     price_cached = prices.get("cache_read")
     if price_cached is None:
         price_cached = price_in
+    multipliers = config.CACHE_MULTIPLIERS.get(config.PROVIDER.get(model, ""))
+    write_multiplier = multipliers["write"] if multipliers else 1.0
     return (
         input_tokens / 1e6 * price_in
         + output_tokens / 1e6 * price_out
         + cached_tokens / 1e6 * price_cached
+        + written_tokens / 1e6 * price_in * write_multiplier
     )
 
 
@@ -365,7 +378,7 @@ def print_cost_summary() -> None:
         for line in f:
             record = json.loads(line)
             t = totals.setdefault(
-                record["model"], {"input": 0, "output": 0, "cached": 0}
+                record["model"], {"input": 0, "output": 0, "cached": 0, "written": 0}
             )
             t["input"] += record.get("input_tokens") or 0
             # Gemini bills thought tokens as output tokens.
@@ -373,25 +386,31 @@ def print_cost_summary() -> None:
                 record.get("thought_tokens") or 0
             )
             t["cached"] += record.get("cached_input_tokens") or 0
+            t["written"] += record.get("cache_creation_tokens") or 0
 
     print("--- Cost summary ---")
     known_total = 0.0
     for model, tokens in totals.items():
-        cost = cost_of(model, tokens["input"], tokens["output"], tokens["cached"])
+        cost = cost_of(
+            model,
+            tokens["input"],
+            tokens["output"],
+            tokens["cached"],
+            tokens["written"],
+        )
+        counts = (
+            f"{tokens['input']} in / {tokens['output']} out incl. thinking / "
+            f"{tokens['cached']} cache read / {tokens['written']} cache write"
+        )
         if cost is None:
             print(
                 f"{model}: no price configured — set "
                 f"config.PRICE_PER_MTOK_USD[{model!r}] from the provider's "
-                f"pricing page. Tokens: {tokens['input']} in / "
-                f"{tokens['output']} out (incl. thinking) / {tokens['cached']} cached."
+                f"pricing page. Tokens: {counts}."
             )
             continue
         known_total += cost
-        print(
-            f"{model}: ${cost:.4f}  "
-            f"({tokens['input']} in / {tokens['output']} out incl. thinking / "
-            f"{tokens['cached']} cached)"
-        )
+        print(f"{model}: ${cost:.4f}  ({counts})")
     print(f"Total across models with a configured price: ${known_total:.4f}")
 
 

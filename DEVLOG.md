@@ -1081,6 +1081,164 @@ gemini-3.7-flash first), then start the main run.
 
 ---
 
+## 2026-08-15 05:20 — Opus (claude-opus-5, Claude Code)
+
+**Built:**
+
+- **The model list is final and verified live.** `config.MAIN_MODELS` is now
+  `claude-haiku-4-5-20251001`, `claude-sonnet-5`, `claude-opus-5`,
+  `gemini-3.6-flash`, `gemini-3.1-pro-preview`. Both new strings were checked
+  against `client.models.list()` before any run, per instruction to stop rather
+  than fall back silently; both resolve, and both have since answered real calls.
+  `MAIN_MODEL_CANDIDATES` and the `--estimate` block that printed marginal
+  fifth-model costs are deleted — the slot is filled.
+- **Prices for the two new models, verified, not guessed.** Sonnet 5 $2/$10 per
+  MTok, Opus 5 $5/$25, with published cache-read rates ($0.20 / $0.50) now stored
+  as a `cache_read` key so the cost summary does not have to derive them.
+  Anthropic's page also states Sonnet 5's $2/$10 is no longer introductory: the
+  rise to $3/$15 scheduled for 2026-09-01 will not happen.
+- **Real cache accounting, replacing the estimate.** `CallResult` gained
+  `cache_creation_tokens`; it is logged per call and summed per model in a new
+  section of `print_usage_summary()`, alongside reads and the model's minimum.
+  `run_pilot.cost_of` now bills cache writes at 1.25x and reads at the cache-read
+  price. This was also a **cost bug**: Anthropic's `input_tokens` excludes both
+  cache fields, so before this change a cached run was billed as if its cached
+  tokens had never been sent.
+- **A live smoke test, as its own command.** `run_main.py --smoke` drives one
+  model × one task × all three formats through `run()` itself — the real code
+  path, not a copy — writing to separate `smoke_*.jsonl` files so an interrupted
+  test cannot make the real run skip cells. `--smoke-probe` sends one codegen
+  call to each of the five models. `run()` and `remaining_calls()` took `models`
+  and path parameters to make this possible; defaults are unchanged.
+- **`pilot/tests/test_elicit.py`** (7 tests, suite now 90) pinning the
+  response-shape bug below, and asserting every configured model has a provider,
+  a price and a cache minimum.
+
+**Decided:**
+
+- **Task count stays at 60** (user's decision, now recorded in
+  `config.NUM_MBPP_TASKS_MAIN` with the reasoning rather than only as a
+  deviation). The 100-task figure was powered for the across-model correlation.
+  That analysis is now *secondary* and will only include models that pass the
+  validity screen — possibly three of five — and no task count rescues a
+  correlation computed over three points. The primary result is the per-cell
+  distribution of `y`, for which 60 is ample.
+- **Caching stays on for all five models** even though three of them can never
+  use it. A prompt below its model's minimum is processed uncached with no error
+  and no write premium, so a breakpoint that never fires costs nothing.
+- **Extended thinking is now switched off explicitly on Anthropic rating calls**
+  rather than left at the default — see "Did not work". This implements
+  CLAUDE.md's existing "leave it off" instruction rather than changing it, and
+  mirrors what `GOOGLE_RATING_THINKING_LEVEL` already does for Gemini. Code
+  generation keeps each model's default thinking.
+- **The three CLAUDE.md contradictions are resolved** (authorised this session,
+  and the only CLAUDE.md edits made): the scope boundary now states the pilot has
+  returned its verdict and the main experiment is authorised; the "exactly 5
+  scale points" row is struck through and replaced with the three-format decision
+  plus the stability-vs-resolution tension and a pointer to DESIGN.md §3; the
+  "100 tasks" row now reads 60 with the reason. The `pytest tests/ -v` path typo
+  was **not** touched — it was not in the authorisation and stays in Open
+  Questions.
+
+**Did not work:**
+
+- **`response.content[0].text` is wrong, and Opus 5 is what proved it.** 52 of
+  128 rating calls in the first smoke run died with
+  `AttributeError("'ThinkingBlock' object has no attribute 'text'")`.
+  claude-opus-5 emits a thinking block ahead of its answer on a minority of
+  calls **with no thinking requested**, so indexing block 0 fails
+  non-deterministically — the same prompt succeeded 5 times in 6 in a direct
+  probe. CLAUDE.md's "extended thinking is off by default" was verified on
+  Haiku 4.5 and Sonnet 4.6 and does not hold for this model.
+  - The crash was the visible half. The **measurement** half is worse: against
+    `max_output_tokens_rating` of 8, the thinking block consumed the entire
+    budget and the reply contained no digit at all (`stop_reason: max_tokens`,
+    empty thinking text). Even with the crash fixed, ~40% of Opus 5's rating
+    draws would have been silently dropped as parse failures — the exact failure
+    mode the `ANSWER_INSTRUCTION` fix closed on 2026-08-14, returning through a
+    different door.
+  - Two fixes, both needed: `_first_text()` scans for the first text block
+    instead of indexing, and `thinking: {"type": "disabled"}` is sent on rating
+    calls. Verified: 12/12 clean probes after, then 76/76 calls with 0 errors and
+    0 parse failures.
+  - **This is the case for smoke-testing.** At full scale this would have
+    contaminated one fifth of the run — 4,560 calls — and the symptom would have
+    read as Opus 5 refusing to answer, not as our bug.
+- **`load_tasks(0, 1)` returned every task in both datasets.** The loaders check
+  `len(loaded) == n` only *after* appending, so `n=0` never matches and the loop
+  runs to the end. Caught because the smoke test asked for one LBPP task and got
+  MBPP task 11. Guarded with an early return in both loaders. Not reached by the
+  real run, which never asks for zero, but it silently returned 380 tasks where
+  0 were requested.
+- **A SIGKILL'd run leaves no console trace.** stdout is block-buffered when not
+  a tty, so the first killed run's progress output was lost entirely. The JSONL
+  files were complete and correct, which is the point of writing them per call,
+  but `python3 -u` is needed to watch a real run's progress through a pipe.
+
+**State:**
+
+Smoke test: **414 live calls, $0.6450 total.** Everything on the untested list
+from the last entry has now been exercised.
+
+- **All five models answered.** One LBPP codegen call each: Haiku 106 tokens,
+  Sonnet 5 115, Opus 5 131, gemini-3.6-flash 878 (85 out + 793 thought),
+  gemini-3.1-pro-preview 975 (65 out + 910 thought). None truncated, all five
+  extracted cleanly.
+- **The raised ceiling is confirmed necessary and sufficient.** Gemini Pro spent
+  975 combined tokens on one LBPP problem. The old ceiling was 1020. It fits
+  inside 4096 with room; it did not inside 1020, and that is the whole of the
+  earlier "80% LBPP failure rate".
+- **All three formats ran live for the first time**, Opus 5 and Haiku, 76 calls
+  each. **0 parse failures in 150 rating calls**, including 30 on `p7`, which had
+  never been sent to any model.
+- **Resume recovers a genuinely interrupted run.** Killed with `kill -9` 31 calls
+  in (one format complete, five ratings of the second lost). On restart: 50 calls
+  exactly — two formats × 25, **zero code-generation calls** — and all 50 prompts
+  replayed the persisted solution byte-for-byte. Compared against a separate
+  uninterrupted run of the same cell, all three formats agreed on
+  `scale_direction` and `low_vignette_first`, which is the keyed-randomisation
+  guarantee holding in practice and not only in `test_resume.py`.
+- **Caching is real on Opus 5 and measured, not estimated:** 3,229 tokens
+  written, 12,916 read on one task — 28.1% of its input tokens — saving **18.2%**
+  of that cell's cost. Haiku, Sonnet 5 and both Geminis reported 0 written and 0
+  read, exactly as their minimums predict. So the earlier "$0.07 of $19.59"
+  figure was correct *for the model set it was computed on*; adding Opus 5
+  changes it materially.
+- **The estimator understates Opus 5 by 13%.** Measured $0.2423 for one task ×
+  three formats → $14.54 for 60 tasks, against $12.82 estimated. Consistent with
+  the Claude 4.7+ tokenizer producing ~30% more tokens while
+  `CHARS_PER_TOKEN[anthropic]` was measured on Haiku 4.5 — partly offset by the
+  cache saving being larger than modelled. Haiku measured $2.93 against $2.85
+  estimated, i.e. the calibration is accurate for the model it was calibrated on.
+  Revised projection for the full run: **~$31**, with the two Gemini figures
+  still lower bounds.
+- **Substantive, and explicitly not a finding:** Opus 5's smoke cell is not
+  saturated. `y_v` was 4 on `p5` (not 5), 88-92 with genuine spread on `s100`,
+  and `z_lo` was 3 rather than 0 — both anchors varied, so this cell would pass
+  the validity screen. One task, one model; it means the main run is not doomed
+  to the pilot's ceiling, nothing more.
+- **Untested:** the full 5-model × 60-task × 3-format run itself; `claude-sonnet-5`
+  and both Gemini models have made only a single codegen call each and have never
+  run a rating block or a multi-turn condition-V thread. Sonnet 5 in particular
+  shares Opus 5's generation and may share its thinking-block behaviour on
+  ratings; the fix covers it, but it has not been observed.
+
+**Consequence of the Gemini truncation finding, for the write-up (recorded on
+instruction):** because Gemini's pilot solutions were being cut off at the token
+ceiling, **its measured accuracy was understated** — some of what was scored as
+a wrong answer was a program we never let it finish. It also means Gemini **rated
+truncated code at 100**, i.e. it was expressing maximum confidence in fragments,
+which is not the same claim as being overconfident about complete work. The
+**saturation finding stands unaffected**: rating calls cap at 8-16 tokens, are
+answered in one, and never approach any ceiling — no rating in either pilot was
+truncated. But **every Gemini pilot accuracy figure needs a stated caveat**, and
+`execution_failure_rate` on Gemini's LBPP half (80%) must not be quoted as a
+model property anywhere in the paper.
+
+**Next:** start the main run (`python3 -u run_main.py`), ~22,800 calls, ~$31.
+
+---
+
 # Open Questions
 
 Add anything unresolved. Remove anything answered. This section is the handover
@@ -1181,13 +1339,23 @@ between sessions.
   HIGH passes against `VIGNETTE_HIDDEN_ASSERTS` would close this; it was left out
   this session only to stay inside the assigned scope.
 - ~~**Resumability is REQUIRED before the main experiment.**~~ **Closed
-  2026-08-15:** `pilot/resume.py` plus `run_main.py`. Not yet exercised by
-  interrupting a real run, only by unit tests — see the untested list below.
+  2026-08-15 and now proven live:** a run killed with `kill -9` 31 calls in
+  resumed in exactly 50 calls (two formats, zero code-generation calls), replayed
+  the persisted solution byte-for-byte into all 50 prompts, and drew the same
+  presentation as a separate uninterrupted run of the same cell.
 - ~~**Prompt caching is not yet in the design.**~~ **Closed 2026-08-15:**
-  implemented, measured, and it does almost nothing (**$0.07 of $19.59**). This
-  note's own suspicion was right and understated: the cacheable share of
-  condition V is one call in three, *and* the reused prompts (~1,150 tokens) sit
-  below every model's minimum except Sonnet 4.6's 1,024.
+  implemented, and now **measured live rather than estimated**. The minimum
+  cacheable prompt is 512 tokens for Opus 5, 1,024 for Sonnet 5 and Sonnet 4.6,
+  2,048 for Opus 4.7, 4,096 for Opus 4.6/4.5, Haiku 4.5 and all Gemini 3.x
+  (verified against Anthropic's and Google's caching docs). Our reused prefix is
+  ~1,150 tokens, so of the five configured models only **Opus 5 and Sonnet 5 can
+  cache at all**. Two reasons caching is near-worthless here, and they compound:
+  the reused prefix is small, and **by design only one condition-V call in three
+  is reusable** — the later turns replay each thread's own ratings, and that
+  priming *is* the King & Wand mechanism, so it cannot be factored out. Measured
+  on Opus 5: 3,229 written / 12,916 read on one task, 18.2% off that cell's cost.
+  Kept enabled for every model because a sub-minimum prompt is processed uncached
+  with no error and no write premium — a breakpoint that never fires is free.
 - ~~**`MAX_OUTPUT_TOKENS_DEFAULT` (1024) is still a guess.**~~ **Closed
   2026-08-15, and it was actively harmful:** it was the cause of Gemini's 80 %
   LBPP failure rate, because Gemini's `max_output_tokens` is a combined
@@ -1200,31 +1368,36 @@ between sessions.
   this session's entry). **`gemini-3.7-flash` is still `None`** and must stay
   that way until someone verifies it; `--estimate` prints "unpriced" rather than
   a number.
-- **CLAUDE.md's "Scope boundary" section now contradicts the work in progress.**
-  It says "we are building **the pilot only**… Do not build the main experiment,
-  expand the model list, add analysis beyond DESIGN.md §9" and gates all of that
-  on the pilot returning a GO. This session was instructed to build exactly those
-  things, and the pilot has not returned a GO. The instruction was followed and
-  the contradiction is logged here rather than resolved by editing CLAUDE.md,
-  which is the user's control document. **The user should decide whether that
-  section is now superseded**, because as written it forbids the next step too.
-- **CLAUDE.md's "Locked decisions" table still says "Exactly 5 scale points".**
-  Superseded for the main run by this session's authorised decision, and recorded
-  in DESIGN.md §3 — but the two documents now disagree. Same for "Main
-  experiment: 5 models × 100 tasks", where the instruction was 60 tasks.
+- ~~**Three CLAUDE.md contradictions (scope boundary, "exactly 5 scale points",
+  "5 models × 100 tasks").**~~ **Closed 2026-08-15** by the user's explicit
+  authorisation to edit those three sections, and only those three. The scope
+  boundary now records that the pilot has returned its verdict and the main
+  experiment is authorised; the scale-points row is struck through, replaced with
+  the three-format decision and the Wang-et-al. tension, and points at
+  DESIGN.md §3; the task count reads 60 with the power reasoning.
 - **CLAUDE.md's Commands block says `pytest tests/ -v`; the real path is
-  `pytest pilot/tests/ -v`.** Still unedited. A one-character fix for the user.
-- **Task count for the main run is 60, not DESIGN.md §10's 100.** Simulation
-  gives 98 % of runs positive at 100 vs 93 % at 60, so this costs about 5
-  percentage points of power. 60 is the user's instruction for this run;
-  `config.NUM_MBPP_TASKS_MAIN`/`NUM_LBPP_TASKS_MAIN` carry the note. At $19.59
-  for 60 tasks, 100 tasks would be roughly $33 — budget is not the binding
-  constraint here, so this is worth revisiting on the merits.
-- **The fifth model is not chosen.** `MAIN_MODELS` has four. Marginal cost of a
-  fifth: `claude-opus-4-7` **$14.24** (which would nearly double the run's total
-  to ~$34), or `gemini-3.7-flash` at an unknown price. A third provider would add
-  more between-model scale-use variance than a second Anthropic model, which is
-  what the effect depends on — but no third provider is currently wired up.
+  `pytest pilot/tests/ -v`.** Still unedited, deliberately — it was not in the
+  edit authorisation. A one-word fix for the user.
+- ~~**Task count for the main run is 60, not DESIGN.md §10's 100.**~~ **Settled
+  2026-08-15, user's decision, and the reason is now in
+  `config.NUM_MBPP_TASKS_MAIN` and CLAUDE.md rather than only here:** the
+  100-task figure came from a power analysis for the **across-model correlation**,
+  which is now the *secondary* analysis and will only include models passing the
+  validity screen — possibly three of five. No task count rescues a correlation
+  over three points. The primary result is the per-cell distribution of `y`, for
+  which 60 is ample. Cost was not the deciding factor (60 tasks ≈ $31).
+- ~~**The fifth model is not chosen.**~~ **Closed 2026-08-15. Final list, with
+  the reason for each of the two changes:** `claude-haiku-4-5-20251001`,
+  **`claude-sonnet-5`** (replaces `claude-sonnet-4-6` — current generation, and
+  cheaper at $2/$10 against $3/$15), **`claude-opus-5`** (the fifth slot —
+  current flagship, and the only model in the set whose cache minimum, 512
+  tokens, our ~1,150-token reused prefix clears), `gemini-3.6-flash`,
+  `gemini-3.1-pro-preview`. Both new strings were verified against
+  `client.models.list()` before any spend and have since answered live calls.
+  **The two-provider limitation stands and is unchanged:** a third provider would
+  add more between-model scale-use variance than a third Anthropic model, and
+  that variance is what the effect depends on. This should be named as a
+  limitation in the write-up rather than treated as resolved.
 - **DESIGN.md §4's condition-N wording implies a second code-generation call.**
   Step 1 reads "Coding task → model writes a solution", but the implementation
   generates one solution per (model, task) and replays it into V, N and the P4
@@ -1233,27 +1406,52 @@ between sessions.
   visible assert to V's step 1 but not N's, whereas the implementation sends the
   identical prompt in both, so the conditions differ only in the vignettes. Both
   are wording fixes for the user to make in §4; the code is not changing.
-- **The full multi-turn DESIGN.md §4 flow (vignettes + self-question replayed
-  in one context) is untested.** Only single-turn rating questions have been
-  run so far. `elicit.py`'s Gemini path builds this via explicit
-  `user_input`/`model_output` steps (stateless replay, not
-  `previous_interaction_id` chaining) to match "fresh context every time" —
-  this has not yet been exercised with more than one message in the list.
-- **Everything added on 2026-08-15 is untested against a live API.** Specifically:
-  the `p7` format has never been sent to any model; `s100` has, but through the
-  old monkeypatching runner, not the current one; the raised codegen ceiling has
-  never been exercised, so it is not yet confirmed that 4096 combined
-  thinking+output tokens is actually enough for Gemini on LBPP; the two new
-  models (`claude-sonnet-4-6`, `gemini-3.1-pro-preview`) have never been called
-  at all; and resume has unit tests but has never recovered a genuinely
-  interrupted run. **A small live smoke test — one model, one task, all three
-  formats, then kill it and restart — would cost cents and would exercise every
-  one of these before ~18,000 calls are committed.** It was not run this session
-  because the instruction was to stop before the main run.
+- **The full multi-turn DESIGN.md §4 flow is now tested on Anthropic and still
+  untested on Google.** The smoke test ran complete condition-V threads
+  (vignettes then self-question, one context) on Opus 5 and Haiku, 150 rating
+  calls, 0 parse failures. **`elicit.py`'s Gemini path has still never been sent
+  more than one message.** It builds the thread from explicit
+  `user_input`/`model_output` steps — stateless replay rather than
+  `previous_interaction_id` chaining, to match "fresh context every time" — and
+  if that step encoding is wrong, it will be wrong on every Gemini cell.
+  **Check the first Gemini condition-V thread of the main run by hand.**
+- ~~**Everything added on 2026-08-15 is untested against a live API.**~~ **Closed
+  2026-08-15 by the smoke test: 414 calls, $0.6450.** `p7` and `s100` both ran
+  live through the current runner (0 parse failures in 150 rating calls); the
+  raised ceiling is confirmed both necessary and sufficient (Gemini Pro spent 975
+  combined tokens on one LBPP problem, against the old ceiling of 1020); all five
+  models answered; resume recovered a `kill -9`. **This note paid for itself
+  several times over** — it caught a non-deterministic crash that would have
+  contaminated 4,560 Opus 5 calls, and a task-loader bug. Keep the habit.
+- **`claude-sonnet-5` and the two Gemini models have made one codegen call each
+  and have never run a rating block.** The residue of the smoke test's scope. The
+  specific risk is that Sonnet 5 shares Opus 5's generation and may share its
+  thinking-block-on-rating behaviour; the `_first_text` + `thinking: disabled`
+  fix covers it by construction, but it has not been *observed* on that model.
+  Watch the first Sonnet 5 and Gemini cells of the main run for errors and parse
+  failures before letting it run unattended.
 - **The cost estimate's Gemini figures are a lower bound and should be checked
   against the first real spend.** `EST_CODEGEN_OUTPUT_TOKENS[google] = 854` was
   measured while the ceiling was 1020 combined tokens with 20 of 40 calls
   censored at it, so the true mean is higher — possibly much higher, since the
   distribution was cut off precisely where it mattered. If actual Gemini spend
   runs well above $2.20 (Flash) / $6.00 (Pro), this is why, and it is not a
-  pricing error.
+  pricing error. The smoke test's two uncensored Gemini codegen calls (878 and
+  975 combined tokens) sit *above* the 854 assumption, consistent with this.
+- **The estimator understates Claude 4.7+ models by roughly 13%, and that is
+  understood, not a mystery.** `CHARS_PER_TOKEN[anthropic] = 3.321` was measured
+  on Haiku 4.5; Claude 4.7 and later use a newer tokenizer producing ~30% more
+  tokens for the same text. Measured against estimate: Opus 5 $14.54 vs $12.82
+  (60 tasks), Haiku $2.93 vs $2.85. Re-measuring the ratio on Opus 5's own logs
+  would close this; it is not worth doing before the run, because the direction
+  and rough size are known and the total (~$31) is well inside budget.
+- **WRITE-UP OBLIGATION: every Gemini pilot accuracy figure needs a stated
+  caveat.** Gemini's pilot solutions were truncated at our token ceiling, so its
+  measured accuracy is **understated** — some of what was scored as a wrong answer
+  was a program we never let it finish. The same fact means Gemini **rated
+  truncated code at 100**, which is a different claim from being overconfident
+  about complete work and must not be conflated with it. In particular the 80%
+  `execution_failure_rate` on Gemini's LBPP half is **an artifact of our
+  configuration and must never be quoted as a property of the model.** The
+  **saturation finding is unaffected**: rating calls cap at 8-16 tokens, are
+  answered in one, and no rating call in either pilot was truncated.

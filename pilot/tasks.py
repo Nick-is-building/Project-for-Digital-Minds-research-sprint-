@@ -72,6 +72,10 @@ def _mbpp_qualifies(row: dict) -> str | None:
 
 def _load_mbpp(n: int) -> list[Task]:
     """Loads the first `n` qualifying MBPP test-split tasks, by task_id."""
+    # Without this, n=0 falls through to "return every qualifying task": the
+    # count is only checked after an append, so it never equals 0.
+    if n <= 0:
+        return []
     dataset = load_dataset("google-research-datasets/mbpp", split="test")
     rows = sorted(dataset, key=lambda r: r["task_id"])
 
@@ -116,6 +120,8 @@ def _lbpp_entry_point(signature: str) -> str | None:
 
 def _load_lbpp(n: int) -> list[Task]:
     """Loads the first `n` qualifying LBPP python-split tasks, by task_id."""
+    if n <= 0:
+        return []
     dataset = load_dataset("CohereForAI/lbpp", "python", split="test")
     rows = sorted(dataset, key=lambda r: r["task_id"])
 

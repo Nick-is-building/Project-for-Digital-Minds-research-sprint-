@@ -27,9 +27,11 @@ is expected rather than exceptional; see that module for why solutions in
 particular must be persisted rather than regenerated.
 
 Usage:
-    python run_main.py --dry-run    # one condition-V context per format, no calls
-    python run_main.py --estimate   # cost estimate, with and without caching
-    python run_main.py              # the run itself
+    python run_main.py --dry-run      # one condition-V context per format, no calls
+    python run_main.py --estimate     # cost estimate, with and without caching
+    python run_main.py --smoke-probe  # one codegen call per model, live
+    python run_main.py --smoke        # one model x one task x three formats, live
+    python run_main.py                # the run itself
 """
 
 import argparse
@@ -156,10 +158,11 @@ def remaining_calls(
     task_list: list[tasks.Task],
     done: set[resume.ObservationKey],
     solutions: dict[resume.SolutionKey, resume.SolutionRecord],
+    models: tuple[str, ...] = config.MAIN_MODELS,
 ) -> int:
     """What is still to be spent, given what the output files already contain."""
     total = 0
-    for model in config.MAIN_MODELS:
+    for model in models:
         for task in task_list:
             outstanding = [
                 fmt
@@ -177,15 +180,24 @@ def remaining_calls(
 # --- The run ----------------------------------------------------------------
 
 
-def run(task_list: list[tasks.Task]) -> list[analyze.Observation]:
+def run(
+    task_list: list[tasks.Task],
+    models: tuple[str, ...] = config.MAIN_MODELS,
+    observations_path=config.MAIN_OBSERVATIONS_PATH,
+    solutions_path=config.MAIN_SOLUTIONS_PATH,
+) -> list[analyze.Observation]:
     """Runs every outstanding (model, task, format) cell, appending as it goes.
 
     Observations are appended one at a time, before the next cell starts, so an
     interruption loses at most the cell in flight.
+
+    `models` and the two paths are parameters so the smoke test can drive this
+    exact function on a narrowed cell set writing to its own files. The real run
+    must not be a different code path from the one that was smoke-tested.
     """
-    done = resume.completed_observation_keys(config.MAIN_OBSERVATIONS_PATH)
-    solutions = resume.load_solutions(config.MAIN_SOLUTIONS_PATH)
-    observations = resume.load_observations(config.MAIN_OBSERVATIONS_PATH)
+    done = resume.completed_observation_keys(observations_path)
+    solutions = resume.load_solutions(solutions_path)
+    observations = resume.load_observations(observations_path)
 
     if done or solutions:
         print(
@@ -193,7 +205,7 @@ def run(task_list: list[tasks.Task]) -> list[analyze.Observation]:
             f"already on disk."
         )
 
-    for model in config.MAIN_MODELS:
+    for model in models:
         for task in task_list:
             outstanding = [
                 fmt
@@ -214,7 +226,7 @@ def run(task_list: list[tasks.Task]) -> list[analyze.Observation]:
                         f"retried on the next run."
                     )
                     continue
-                resume.append_solution(record, config.MAIN_SOLUTIONS_PATH)
+                resume.append_solution(record, solutions_path)
                 solutions[record.key] = record
 
             for fmt in outstanding:
@@ -230,7 +242,7 @@ def run(task_list: list[tasks.Task]) -> list[analyze.Observation]:
                         record, task, fmt, direction, low_first, draws
                     )
                 observations.append(obs)
-                pilot.append_observation(obs, config.MAIN_OBSERVATIONS_PATH)
+                pilot.append_observation(obs, observations_path)
                 done.add(resume.observation_key(obs))
 
             state = "no solution" if record.solution is None else "done"
@@ -474,16 +486,6 @@ def estimate(task_list: list[tasks.Task]) -> None:
     )
     print()
 
-    candidates = [
-        _model_estimate(task_list, model)
-        for model in config.MAIN_MODEL_CANDIDATES
-        if model not in config.MAIN_MODELS
-    ]
-    if candidates:
-        print("--- Fifth-model candidates: marginal cost of adding one ---")
-        _print_estimate_table(candidates)
-        print()
-
     print("--- Prompt caching ---")
     print(
         "A cache breakpoint is only set where a prefix is genuinely reused: the "
@@ -561,6 +563,74 @@ def dry_run(task_list: list[tasks.Task]) -> None:
     )
 
 
+# --- Smoke test --------------------------------------------------------------
+#
+# Two commands, both hitting the live APIs on one LBPP task:
+#
+#   --smoke        one model, that task, all three formats, through run() itself.
+#                  Run it, kill it mid-way, run it again: the second invocation
+#                  must reuse the persisted solution and skip finished formats.
+#   --smoke-probe  one code-generation call to each of the five configured
+#                  models. Cheap proof that every model string resolves and
+#                  answers, and that a real LBPP codegen call fits inside the
+#                  raised 4096-token ceiling — the one that was 1020 and was
+#                  silently truncating Gemini.
+
+
+def smoke_task() -> tasks.Task:
+    """One LBPP task: the harder half, where the old ceiling actually bit."""
+    return tasks.load_tasks(0, 1)[0]
+
+
+def smoke(task: tasks.Task, model: str = config.SMOKE_MODEL) -> None:
+    elicit.set_raw_log_path(config.SMOKE_RAW_JSONL_PATH)
+    direction, low_first = context_for(model, task.task_id)
+    print(
+        f"Smoke: {model} on {task.task_set} task {task.task_id}, "
+        f"{direction}, low_vignette_first={low_first}, "
+        f"{len(config.MAIN_SCALE_FORMATS)} formats, "
+        f"{calls_per_task()} calls if nothing is already done."
+    )
+
+    run(
+        [task],
+        models=(model,),
+        observations_path=config.SMOKE_OBSERVATIONS_PATH,
+        solutions_path=config.SMOKE_SOLUTIONS_PATH,
+    )
+
+    done = resume.completed_observation_keys(config.SMOKE_OBSERVATIONS_PATH)
+    print(f"\nFormats complete: {sorted(key[2] for key in done)}")
+    elicit.print_usage_summary()
+    pilot.print_cost_summary()
+
+
+def smoke_probe(task: tasks.Task) -> None:
+    elicit.set_raw_log_path(config.SMOKE_RAW_JSONL_PATH)
+    print(
+        f"Probing {len(config.MAIN_MODELS)} models with one codegen call each on "
+        f"{task.task_set} task {task.task_id}, ceiling "
+        f"{config.MAX_OUTPUT_TOKENS_CODEGEN} tokens.\n"
+    )
+    for model in config.MAIN_MODELS:
+        result = elicit.elicit_call(
+            model,
+            [{"role": "user", "content": pilot._codegen_message(task)}],
+            config.MAX_OUTPUT_TOKENS_CODEGEN,
+        )
+        code, reason = extract.extract_code(result.text, truncated=result.truncated)
+        spent = (result.output_tokens or 0) + (result.thought_tokens or 0)
+        print(
+            f"{model:<28} {spent:>5} of {config.MAX_OUTPUT_TOKENS_CODEGEN} tokens "
+            f"({result.output_tokens} out + {result.thought_tokens} thought), "
+            f"truncated={result.truncated}, "
+            f"extracted={'yes' if code else f'NO ({reason})'}"
+        )
+    print()
+    elicit.print_usage_summary()
+    pilot.print_cost_summary()
+
+
 # --- Entry point ------------------------------------------------------------
 
 
@@ -577,7 +647,29 @@ def main() -> int:
         action="store_true",
         help="print the projected cost of the full run and exit",
     )
+    group.add_argument(
+        "--smoke",
+        action="store_true",
+        help="one model, one task, three formats, into the smoke output files",
+    )
+    group.add_argument(
+        "--smoke-probe",
+        action="store_true",
+        help="one code-generation call to each configured model, and exit",
+    )
+    parser.add_argument(
+        "--smoke-model",
+        default=config.SMOKE_MODEL,
+        choices=config.MAIN_MODELS,
+        help="which model --smoke drives (default: %(default)s)",
+    )
     args = parser.parse_args()
+
+    if args.smoke or args.smoke_probe:
+        elicit.set_call_budget(calls_per_task() * len(config.MAIN_MODELS))
+        task = smoke_task()
+        smoke(task, args.smoke_model) if args.smoke else smoke_probe(task)
+        return 0
 
     task_list = tasks.load_tasks(
         config.NUM_MBPP_TASKS_MAIN, config.NUM_LBPP_TASKS_MAIN
