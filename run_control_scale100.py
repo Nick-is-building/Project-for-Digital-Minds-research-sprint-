@@ -17,22 +17,28 @@ scale and are meaningless here.
 Everything except the scale is identical to run_pilot.py: same 20 tasks (10
 MBPP + 10 LBPP), same two models, same three questions (pronoun-only
 difference), same two vignettes, same 5 samples at temperature 1.0, same
-condition V / condition N / P4-probe turn structure, same random seed. This
-is achieved by monkeypatching a handful of `pilot.config` attributes at
-process start and then calling run_pilot.py's own (unmodified) functions —
-`_run_observation`, `_dry_run`, `_planned_calls`, `_print_cost_summary` — so
-the turn-sequencing logic that DEVLOG already validated cannot drift between
-the two scripts.
+condition V / condition N / P4-probe turn structure, same random seed. This is
+achieved by calling run_pilot.py's own functions with `config.SCALE_S100`, so
+the turn-sequencing logic that DEVLOG already validated cannot drift between the
+two scripts.
 
-Two deviations from the literal 5-point config, both confirmed with the user
-before running (see DEVLOG):
+Updated 2026-08-15: this script used to monkeypatch `pilot.config` attributes
+(SCALE_POINTS, ANSWER_INSTRUCTION, MAX_OUTPUT_TOKENS_RATING, RAW_JSONL_PATH) at
+process start, because the scale was a module-level constant. Scale format is
+now a `ScaleFormat` passed explicitly (DESIGN.md §3), so the patching is gone
+and `config.SCALE_S100` carries exactly the same values this script defined —
+its wording and its 16-token rating cap were adopted verbatim into that format
+so the two runs' data stay comparable.
 
-- ANSWER_INSTRUCTION's original text says "a single digit", which would cap
-  every reply at 0-9 and defeat the point of a 0-100 scale. Reworded to keep
-  the same strict, no-prose intent while permitting the actual range.
-- MAX_OUTPUT_TOKENS_RATING=8 was sized for a one-digit reply; raised to 16 as
-  headroom for a up-to-three-digit reply. parse_rating is untouched and stays
-  strict — this is not a parser relaxation.
+Its two original deviations from the 5-point config, both confirmed with the
+user before running (see DEVLOG), now live in config.SCALE_S100:
+
+- "a single digit" would cap every reply at 0-9 and defeat the point of a 0-100
+  scale, so the instruction is reworded to keep the same strict, no-prose intent
+  while permitting the actual range.
+- an 8-token rating cap was sized for a one-digit reply; 16 gives headroom for
+  up to three digits. parse_rating is untouched and stays strict — this is not a
+  parser relaxation.
 
 Writes to separate files; the 5-point run's data is never opened for writing:
     pilot/out/raw_scale100.jsonl
@@ -55,44 +61,20 @@ import run_pilot as pilot_run
 from pilot import config, elicit
 from pilot.analyze import Observation
 
-# --- Wide-scale overrides (see module docstring for the reasoning) ----------
+# --- The wide scale (see module docstring for the reasoning) ----------------
 
-SCALE_POINTS_WIDE = {0: "Very unlikely", 100: "Very likely"}
+SCALE_WIDE = config.SCALE_S100
 
-ANSWER_INSTRUCTION_WIDE = (
-    "Reply with a single integer from 0 to 100 and nothing else — no words, "
-    "no punctuation, no explanation."
-)
-
-MAX_OUTPUT_TOKENS_RATING_WIDE = 16
-
-# TOLERANCE=0.01 (DESIGN.md §5) is calibrated to a width-4 scale (1-5). The
-# proportional equivalent on a width-100 scale is 0.01 * 100/4 = 0.25.
-TOLERANCE_WIDE = 0.25
+# The proportional equivalent of the 5-point run's 0.01 on a width-100 scale,
+# now derived rather than restated: 0.0025 x 100 = 0.25 (DESIGN.md §5, §9).
+TOLERANCE_WIDE = SCALE_WIDE.tolerance
 
 RAW_JSONL_PATH_WIDE = config.OUT_DIR / "raw_scale100.jsonl"
 OBSERVATIONS_PATH_WIDE = config.OUT_DIR / "observations_scale100.jsonl"
 REPORT_PATH_WIDE = config.OUT_DIR / "report_scale100.md"
 
-_MIN_POINT_WIDE = 0
-_MAX_POINT_WIDE = 100
 
-
-def _apply_overrides() -> None:
-    """Patches `pilot.config` attributes in place.
-
-    Every consumer (run_pilot.py, elicit.py) reads these off the `config`
-    module object at call time, not at import time, so patching after import
-    and before any call is sufficient — see module docstring.
-    """
-    config.SCALE_POINTS = SCALE_POINTS_WIDE
-    config.ANSWER_INSTRUCTION = ANSWER_INSTRUCTION_WIDE
-    config.MAX_OUTPUT_TOKENS_RATING = MAX_OUTPUT_TOKENS_RATING_WIDE
-    config.RAW_JSONL_PATH = RAW_JSONL_PATH_WIDE
-
-
-# --- Persistence (separate files; run_pilot._append_observation is NOT reused
-# because it hardcodes "observations.jsonl") -------------------------------
+# --- Persistence (separate files) -------------------------------------------
 
 
 def _append_observation(obs: Observation) -> None:
@@ -105,7 +87,7 @@ def _append_observation(obs: Observation) -> None:
 
 
 def _valid_draws_wide(draws: list[int | None]) -> list[int]:
-    return [d for d in draws if d is not None and _MIN_POINT_WIDE <= d <= _MAX_POINT_WIDE]
+    return [d for d in draws if d is not None and SCALE_WIDE.in_range(d)]
 
 
 def _mean_wide(draws: list[int | None]) -> float | None:
@@ -132,7 +114,7 @@ def _parse_failure_rate(obs_list: list[Observation]) -> dict[str, object]:
             total += len(draws)
             failures += sum(1 for d in draws if d is None)
             off_scale += sum(
-                1 for d in draws if d is not None and not _MIN_POINT_WIDE <= d <= _MAX_POINT_WIDE
+                1 for d in draws if d is not None and not SCALE_WIDE.in_range(d)
             )
     return {
         "rating draws": total,
@@ -150,12 +132,12 @@ def render_report(observations: list[Observation]) -> str:
         "5-point pilot. P1-P4 thresholds are NOT applied — they are calibrated "
         "to a width-4 scale and are meaningless here.",
         "",
-        f"Scale: two labelled endpoints, {SCALE_POINTS_WIDE}. "
-        f"ANSWER_INSTRUCTION: {ANSWER_INSTRUCTION_WIDE!r}. "
-        f"MAX_OUTPUT_TOKENS_RATING: {MAX_OUTPUT_TOKENS_RATING_WIDE}. "
-        f"Equality/near-ceiling tolerance: {TOLERANCE_WIDE} "
-        "(proportional equivalent of the 5-point run's TOLERANCE=0.01 on a "
-        "width-100 scale, i.e. 0.01 * 100/4).",
+        f"Scale: two labelled endpoints, {dict(SCALE_WIDE.labels)}. "
+        f"Answer instruction: {SCALE_WIDE.answer_instruction!r}. "
+        f"Rating token cap: {SCALE_WIDE.max_output_tokens_rating}. "
+        f"Equality/near-ceiling tolerance: {TOLERANCE_WIDE:g} "
+        "(the width-relative equivalent of the 5-point run's 0.01, i.e. "
+        "0.0025 x 100).",
         "",
         f"{len(observations)} observations.",
         "",
@@ -230,12 +212,19 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    _apply_overrides()
+    elicit.set_raw_log_path(RAW_JSONL_PATH_WIDE)
 
     task_list = pilot_run.tasks.load_tasks()
 
     if args.dry_run:
-        pilot_run._dry_run(task_list)
+        rng = random.Random(config.PILOT_RANDOM_SEED)
+        pilot_run.dry_run_condition_v(
+            task_list[0],
+            SCALE_WIDE,
+            rng.choice(config.SCALE_DIRECTIONS),
+            rng.choice((True, False)),
+            config.PILOT_MODELS[0],
+        )
         return 0
 
     planned = pilot_run._planned_calls(len(task_list))
@@ -258,7 +247,7 @@ def main() -> int:
     try:
         for model in config.PILOT_MODELS:
             for task in task_list:
-                obs = pilot_run._run_observation(model, task, rng)
+                obs = pilot_run._run_observation(model, task, rng, SCALE_WIDE)
                 observations.append(obs)
                 _append_observation(obs)
                 print(f"  {model} task {task.task_id}: done")
@@ -272,7 +261,7 @@ def main() -> int:
         print(f"\nWrote {REPORT_PATH_WIDE}")
 
     elicit.print_usage_summary()
-    pilot_run._print_cost_summary()
+    pilot_run.print_cost_summary()
     return 0
 
 

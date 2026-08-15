@@ -959,6 +959,128 @@ should differ from the locked 5-point default given this session's result.
 
 ---
 
+## 2026-08-15 04:20 — Opus (claude-opus-5, Claude Code)
+
+**Built:**
+
+- **DESIGN.md updated** for the three decisions the user made this session, and
+  only those. §3 now defines three scale formats (`p5` 1-5 unchanged, `p7` 1-7
+  after the Pinocchio Inventory, `s100` 0-100) and names the Wang/Zhou/Liu
+  tension explicitly instead of dropping the citation: their result is about
+  *stability* against label order, ours is about *resolution* near the ceiling,
+  and both hold. §2 gained a "validity screen (reported, not filtered)"
+  subsection. §5 records that `C` has five categories in every format (two
+  anchors partition the line into five regions, regardless of input cardinality)
+  and that the tolerance is `0.0025·W`. §9's thresholds are now a table of
+  fractions of `W`, printed as both the fraction and the value in that format's
+  points. §10 records that all three formats run on the same tasks, models and
+  solutions.
+- **`config.ScaleFormat`** — the scale is now an object passed explicitly, with
+  `width`, `fully_labelled`, `in_range`, and the width-relative `tolerance`,
+  `p1_min_sd`, `p3_min_difference`, `p4_max_abs_gap` hanging off it. The
+  module-level `SCALE_POINTS`/`TOLERANCE`/`P1_MIN_SD`/`P3_MIN_SCALE_POINT_
+  DIFFERENCE`/`P4_MAX_ABS_GAP`/`MAX_OUTPUT_TOKENS_RATING` constants are deleted,
+  so a threshold can no longer go stale against the format in use. Verified at
+  W=4 the fractions reproduce the locked values exactly: 0.3 / 0.5 / 0.75 / 0.01.
+- **`pilot/extract.py`** — code extraction split out of `run_pilot.py`, with a
+  rejection reason per failure mode (`no_reply`, `truncated_by_output_ceiling`,
+  `unclosed_code_fence`, `no_function_definition`, `syntax_error`) recorded on
+  the observation as `codegen_failure_reason`. `ast.parse` is the last gate.
+- **`pilot/resume.py`** — observations keyed `(model, task_id, scale_format)`,
+  solutions keyed `(model, task_id)` and persisted separately with their ground
+  truth. `_read_jsonl` forgives a truncated *final* line only.
+- **`run_main.py`** — the main-experiment runner. Imports `run_pilot`'s message
+  builders rather than restating them, crosses scale format with model and task,
+  skips completed cells, and has `--dry-run` and `--estimate` modes.
+- **Prompt caching** in `elicit.py` (Anthropic explicit `cache_control`, Gemini
+  implicit), requested only where a prefix is genuinely reused ≥2×.
+- **56 new tests** in `test_analyze.py` (the `_orient` regression), 
+  `test_extract.py` and `test_resume.py`. `pytest pilot/tests/ -v`: **83 passed**,
+  `test_invariance` included and untouched.
+
+**Decided:**
+
+- **The (a) root cause was Gemini's combined thinking+output budget, not code
+  extraction.** `max_output_tokens` on the Interactions API caps thinking *plus*
+  output together. All 5 failed codegen calls had thought+output = exactly 1020;
+  20 of 40 Gemini codegen calls hit that ceiling; Claude peaked at 620/1024 with
+  none at the ceiling. The extractor's `else text` fallback then *masked* it: a
+  truncated reply has an opening fence and no closing one, so the fence regex
+  misses, so the literal ```` ```python ```` prefix was included in "the
+  solution" — a guaranteed SyntaxError, scored as the model answering
+  incorrectly. Gemini's 80 % LBPP `execution_failure_rate` was measuring our
+  token ceiling, on roughly 12-13 calls. Fixed at the root (ceiling 4096,
+  truncation detected and logged, masking fallback removed), not with a fallback.
+- **Randomisation in the main run is keyed, not sequential.** Each (model, task)
+  seeds its own generator from `(MAIN_RANDOM_SEED, model, task_id)`. Two things
+  depend on this: the three formats of a pair share one presentation, so a format
+  difference is not a direction difference; and skipping finished work on resume
+  cannot shift the draws for what remains, which a shared sequential stream would.
+- **Solutions are persisted, not regenerated.** Sampling is at temperature 1.0,
+  so regenerating after an interruption yields a *different* solution and the
+  three formats of that pair silently stop being paired. Ground truth is stored
+  alongside for the same reason — it is a property of that exact text.
+- **A failed codegen call is only recorded if the failure is about the reply.**
+  `no_reply` means the API call itself returned nothing (timeout, rate limit,
+  dropped connection); that is infrastructure, not data, so nothing is persisted
+  and the next run retries it. Every other reason describes what the model
+  actually emitted, which is a finding: persisted, reported, not retried.
+- **Pricing verified, nothing guessed.** gemini-3.6-flash $0.75/$3.75
+  (promotional through 2026-12-31, then $1.50/$7.50); gemini-3.1-pro-preview
+  $2.00/$12.00 (≤200k tier); Haiku 4.5 $1/$5; Sonnet 4.6 $3/$15; Opus 4.7
+  $5/$25. **gemini-3.7-flash left `None`** and shows as "unpriced". No
+  `gemini-3.6-pro` exists — confirmed against a live `models.list()`.
+- **Cost estimate, 4 models × 60 tasks × 3 formats = 18,240 calls: $19.59
+  without caching, $19.52 with.** Per model: Haiku $2.85, Sonnet $8.54, Gemini
+  Flash $2.20, Gemini Pro $6.00. Fifth-model candidates, marginal: Opus 4.7
+  **$14.24**, gemini-3.7-flash unpriced. Gemini figures are a **lower bound** —
+  the codegen output constant was measured under the old 1020-token ceiling with
+  half the calls censored at it.
+
+**Did not work:**
+
+- **The assignment's premise that our sampling pattern is "the ideal caching
+  case" does not survive contact with the minimum cacheable prompt lengths.**
+  Caching is implemented and requested, and saves **$0.07 of $19.59 (0.4 %)**.
+  Two independent reasons. First, the reused prompts are ~1,150 tokens, against
+  minimums of 4,096 (Haiku 4.5, all Gemini 3.x), 2,048 (Opus 4.7) and 1,024
+  (Sonnet 4.6) — only Sonnet clears its minimum at all. Second, condition V's
+  cacheable share is small by design: only the *opening* vignette question is
+  byte-identical across the 5 threads, because the later turns replay each
+  thread's own ratings, which is the King & Wand priming mechanism and not
+  something to trade away for a discount. The breakpoints are left in because a
+  below-minimum prompt is processed uncached with no error and no write premium,
+  so asking costs nothing.
+- **My first version of the estimate reported Sonnet as broadly cacheable and it
+  was wrong.** It compared the largest prompt overall (1,506 tokens, the
+  self-assessment turn at the end of a condition-V thread) against the minimum —
+  but that prompt carries no cache breakpoint. Fixed to compare the largest
+  *cached* prompt (1,152), which is the figure that decides anything.
+- **`run_control_scale100.py`'s monkeypatching had to be deleted, not adapted.**
+  It patched four `pilot.config` attributes at process start. Once format became
+  a parameter the patches were both inert and misleading, and they were the
+  mechanism by which that run's analysis silently kept 5-point bounds while
+  rating on a 0-100 scale.
+
+**State:**
+
+- `pytest pilot/tests/ -v` → **83 passed** (27 before this session).
+- `python3 run_main.py --dry-run` prints one full condition-V context per format,
+  12 call blocks, showing the width-proportional thresholds per format and
+  `cache_prefix` per call. No API calls.
+- `python3 run_main.py --estimate` prints the table above. No API calls.
+- **The main run has NOT been started, as instructed.**
+- **Untested against a live API:** every code path added this session. The
+  `p7` format has never been sent to a model; `s100` has, but under the old
+  monkeypatching runner. Resume has unit tests but has not been exercised by
+  actually interrupting a real run.
+- `MAIN_MODELS` has **four** entries. The fifth is the user's choice.
+
+**Next:** the user picks the fifth model (Opus 4.7 at $14.24 marginal, or price
+gemini-3.7-flash first), then start the main run.
+
+---
+
 # Open Questions
 
 Add anything unresolved. Remove anything answered. This section is the handover
@@ -1008,11 +1130,10 @@ between sessions.
   `z_lo` 1.890 (Claude) vs 1.021 (Gemini), spread 0.869, on byte-identical
   vignettes. Worth keeping in view — it is the evidence that the correction has
   something genuine to act on once `y` can vary, and it belongs in the write-up.
-- **`_orient` has no regression test.** It silently inverted every descending
-  observation and produced a false NO-GO on the first run; the fix is a one-liner
-  and nothing in the 27 tests would catch a regression. A test asserting that a
-  descending draw is returned unchanged, and that raw anchor orderings are
-  direction-independent, belongs in `pilot/tests/`.
+- ~~**`_orient` has no regression test.**~~ **Closed 2026-08-15:**
+  `pilot/tests/test_analyze.py` asserts a descending draw is returned unchanged
+  in all three formats, that the mean is direction-independent, and that a clean
+  anchor ordering survives a direction flip (the exact quantity P2 counts).
 - **`MAX_OUTPUT_TOKENS_RATING = 8` costs real measurements, unevenly.**
   **Attempted fix (2026-08-14 21:30, strengthened `ANSWER_INSTRUCTION`) WORKED,
   confirmed by the 2026-08-14 22:40 real run: `parse_failure_rate` is 0.0 % for
@@ -1059,37 +1180,51 @@ between sessions.
   silently invert LOW and HIGH. A `test_vignettes.py` asserting LOW fails and
   HIGH passes against `VIGNETTE_HIDDEN_ASSERTS` would close this; it was left out
   this session only to stay inside the assigned scope.
-- **Resumability is REQUIRED before the main experiment (~15,600 calls).** Decided
-  2026-08-14: deliberately not built for the pilot, because a re-run costs under a
-  dollar. Every call already appends to `raw.jsonl` before parsing, but nothing
-  reads that file back to skip completed work, so an interrupted run restarts from
-  zero. At main-experiment scale that is no longer an acceptable loss, and the
-  append-immediately log is only half a resume mechanism until something consumes
-  it.
+- ~~**Resumability is REQUIRED before the main experiment.**~~ **Closed
+  2026-08-15:** `pilot/resume.py` plus `run_main.py`. Not yet exercised by
+  interrupting a real run, only by unit tests — see the untested list below.
+- ~~**Prompt caching is not yet in the design.**~~ **Closed 2026-08-15:**
+  implemented, measured, and it does almost nothing (**$0.07 of $19.59**). This
+  note's own suspicion was right and understated: the cacheable share of
+  condition V is one call in three, *and* the reused prompts (~1,150 tokens) sit
+  below every model's minimum except Sonnet 4.6's 1,024.
+- ~~**`MAX_OUTPUT_TOKENS_DEFAULT` (1024) is still a guess.**~~ **Closed
+  2026-08-15, and it was actively harmful:** it was the cause of Gemini's 80 %
+  LBPP failure rate, because Gemini's `max_output_tokens` is a combined
+  thinking+output budget. Now `MAX_OUTPUT_TOKENS_CODEGEN = 4096`, truncation is
+  detected from the provider's own signal, and `codegen_failure_reason`
+  distinguishes our ceiling from a bad reply. This note called it exactly right —
+  "apparent model incompetence rather than a config problem" is what happened.
+- ~~**`PRICE_PER_MTOK_USD` is `None` for Gemini.**~~ **Closed 2026-08-15** for
+  the four configured models (verified against the providers' pricing pages, see
+  this session's entry). **`gemini-3.7-flash` is still `None`** and must stay
+  that way until someone verifies it; `--estimate` prints "unpriced" rather than
+  a number.
+- **CLAUDE.md's "Scope boundary" section now contradicts the work in progress.**
+  It says "we are building **the pilot only**… Do not build the main experiment,
+  expand the model list, add analysis beyond DESIGN.md §9" and gates all of that
+  on the pilot returning a GO. This session was instructed to build exactly those
+  things, and the pilot has not returned a GO. The instruction was followed and
+  the contradiction is logged here rather than resolved by editing CLAUDE.md,
+  which is the user's control document. **The user should decide whether that
+  section is now superseded**, because as written it forbids the next step too.
+- **CLAUDE.md's "Locked decisions" table still says "Exactly 5 scale points".**
+  Superseded for the main run by this session's authorised decision, and recorded
+  in DESIGN.md §3 — but the two documents now disagree. Same for "Main
+  experiment: 5 models × 100 tasks", where the instruction was 60 tasks.
 - **CLAUDE.md's Commands block says `pytest tests/ -v`; the real path is
-  `pytest pilot/tests/ -v`.** Left unedited because CLAUDE.md is the user's
-  control document — worth a one-character fix by the user.
-- **Prompt caching is not yet in the design, and condition V now benefits less
-  from it than this note originally assumed.** Condition N and the P4 probe do
-  send 5 calls with an identical prefix — the ideal caching case (write 1.25×,
-  read 0.1×). Condition V's 5 threads share only the code-generation prefix; from
-  the first vignette rating onward each thread diverges, because the ratings are
-  re-elicited per thread on purpose. The cacheable share is therefore smaller than
-  "two-thirds off input cost" implies. Recompute against real token counts from
-  the pilot before deciding for the main run.
-- **Task count for the main run assumes 100.** Simulation gives 98 % at 100 vs
-  93 % at 60. Revisit only if budget forces it.
-- **`MAX_OUTPUT_TOKENS_DEFAULT` (1024) is still a guess.** The code-generation
-  prompt now exists (one MBPP problem, its visible assert, "reply with a single
-  Python function and no explanation"), so 1024 should be ample — but a truncated
-  reply would surface as an `_extract_code` failure, i.e. as apparent model
-  incompetence rather than as a config problem. `code_extraction_failure_rate` is
-  in the report for exactly this reason; check it first if it is non-zero.
-- **`PRICE_PER_MTOK_USD` is set for Anthropic ($1.00 in / $5.00 out per Mtok,
-  user-supplied 2026-08-14) and deliberately still `None` for Gemini** — the user
-  has no verified figure and will not guess. Any total cost reported is therefore
-  Anthropic-only; Gemini appears as token counts. Fill in before the main
-  experiment, where spend actually matters.
+  `pytest pilot/tests/ -v`.** Still unedited. A one-character fix for the user.
+- **Task count for the main run is 60, not DESIGN.md §10's 100.** Simulation
+  gives 98 % of runs positive at 100 vs 93 % at 60, so this costs about 5
+  percentage points of power. 60 is the user's instruction for this run;
+  `config.NUM_MBPP_TASKS_MAIN`/`NUM_LBPP_TASKS_MAIN` carry the note. At $19.59
+  for 60 tasks, 100 tasks would be roughly $33 — budget is not the binding
+  constraint here, so this is worth revisiting on the merits.
+- **The fifth model is not chosen.** `MAIN_MODELS` has four. Marginal cost of a
+  fifth: `claude-opus-4-7` **$14.24** (which would nearly double the run's total
+  to ~$34), or `gemini-3.7-flash` at an unknown price. A third provider would add
+  more between-model scale-use variance than a second Anthropic model, which is
+  what the effect depends on — but no third provider is currently wired up.
 - **DESIGN.md §4's condition-N wording implies a second code-generation call.**
   Step 1 reads "Coding task → model writes a solution", but the implementation
   generates one solution per (model, task) and replays it into V, N and the P4
@@ -1104,3 +1239,21 @@ between sessions.
   `user_input`/`model_output` steps (stateless replay, not
   `previous_interaction_id` chaining) to match "fresh context every time" —
   this has not yet been exercised with more than one message in the list.
+- **Everything added on 2026-08-15 is untested against a live API.** Specifically:
+  the `p7` format has never been sent to any model; `s100` has, but through the
+  old monkeypatching runner, not the current one; the raised codegen ceiling has
+  never been exercised, so it is not yet confirmed that 4096 combined
+  thinking+output tokens is actually enough for Gemini on LBPP; the two new
+  models (`claude-sonnet-4-6`, `gemini-3.1-pro-preview`) have never been called
+  at all; and resume has unit tests but has never recovered a genuinely
+  interrupted run. **A small live smoke test — one model, one task, all three
+  formats, then kill it and restart — would cost cents and would exercise every
+  one of these before ~18,000 calls are committed.** It was not run this session
+  because the instruction was to stop before the main run.
+- **The cost estimate's Gemini figures are a lower bound and should be checked
+  against the first real spend.** `EST_CODEGEN_OUTPUT_TOKENS[google] = 854` was
+  measured while the ceiling was 1020 combined tokens with 20 of 40 calls
+  censored at it, so the true mean is higher — possibly much higher, since the
+  distribution was cut off precisely where it mattered. If actual Gemini spend
+  runs well above $2.20 (Flash) / $6.00 (Pro), this is why, and it is not a
+  pricing error.

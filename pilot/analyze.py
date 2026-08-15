@@ -1,25 +1,36 @@
-"""Pilot go/no-go analysis (DESIGN.md §9).
+"""Go/no-go analysis (DESIGN.md §9).
 
 Reduces a list of `Observation` records to the four assumption checks P1–P4,
-their fixed thresholds, and the diagnostics DESIGN.md §9 asks for. Renders
-`out/report.md`: numbers side by side per model, PASS/FAIL per criterion, no
-interpretation.
+their thresholds, the §2 validity screen, and the diagnostics DESIGN.md §9 asks
+for. Renders a report: numbers side by side per model, PASS/FAIL per criterion,
+no interpretation.
 
 Deliberately absent, per DESIGN.md §9 and §10: AUROC, correlations, variance
-ratios, significance tests. Twenty tasks is far too few and any such number
-would be noise inviting over-reading. Nothing in this module computes one.
+ratios, significance tests. Nothing in this module computes one.
 
-Two things here are load-bearing and easy to get silently wrong:
+Four things here are load-bearing and easy to get silently wrong:
 
-**Orientation.** Scale direction is randomised per context (DESIGN.md §3), so a
-raw "2" under descending presentation is not the same rating as a raw "2" under
-ascending. Every draw is re-oriented to a common "higher = more likely" frame by
-`_orient` before it is averaged. Skipping this would mix the two frames and
-corrupt every mean in the report.
+**Scale format.** Format is an experimental variable (DESIGN.md §3), so every
+bound, threshold and tolerance is read off the observation's own `scale_format`
+at the point of use. Previously `_MIN_POINT`/`_MAX_POINT` were module-level and
+computed at *import* time from a single global scale — which is exactly what went
+stale when the 0-100 control run was analysed against 1-5 bounds. `analyze()`
+refuses a mixed-format list rather than pooling formats, because pooling means
+averaging numbers that are not on the same scale.
+
+**Orientation.** Scale direction is randomised per context (DESIGN.md §3), so
+`_orient` exists to make the treatment of direction explicit and testable. It is
+deliberately the identity — see its docstring.
 
 **Range.** A strictly-parsed integer can still be off-scale (a model replying
-"7"). Off-scale draws are excluded from means and counted separately, alongside
-parse failures, rather than being averaged in.
+"7" on a 1-5 scale). Off-scale draws are excluded from means and counted
+separately, alongside parse failures, rather than being averaged in.
+
+**Vacuity.** Constant anchors make rescaling a monotone recoding of `y`, so every
+rank-based statistic is invariant by construction (DESIGN.md §2). Each (model,
+format) cell is screened for that and reported Valid or Invalid. The screen is
+reported, never applied as a silent filter: an Invalid cell's observations stay
+in the tables, and the cell cannot produce a GO.
 
 No P1–P4 threshold is a function of `C`, so the two `tie_rule` runs cannot
 disagree on a verdict; the report states that as a structural fact and shows the
@@ -27,31 +38,34 @@ disagree on a verdict; the report states that as a structural fact and shows the
 """
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from statistics import stdev
 
 from pilot import config
 from pilot.rescale import compute_C, reset_tolerance_counts, tolerance_counts
 
-_MIN_POINT = min(config.SCALE_POINTS)
-_MAX_POINT = max(config.SCALE_POINTS)
-
 RATING_FIELDS = ("y_v_draws", "z_lo_draws", "z_hi_draws", "y_n_draws", "other_draws")
+
+# `C` has five categories in every scale format: two anchors partition the line
+# into exactly five regions (DESIGN.md §5). This is not the input scale.
+C_POINTS = (1, 2, 3, 4, 5)
 
 
 @dataclass(frozen=True)
 class Observation:
-    """One (model, task) unit: both conditions, the P4 probe, and ground truth.
+    """One (model, task, scale format) unit: both conditions, P4, ground truth.
 
     Draws are the raw parsed integers as returned by `elicit`, in the
     orientation they were presented in; `scale_direction` says which that was.
-    Ground truth fields come from execution only (DESIGN.md §8).
+    Ground truth fields come from execution only (DESIGN.md §8) and are shared
+    across the three formats of a (model, task) pair, which all replay the same
+    solution — see DESIGN.md §10.
     """
 
     model: str
     task_id: str
-    task_set: str  # "mbpp" or "lbpp" — see tasks.py. Reporting only (Sonnet,
-    # flagged 2026-08-14 per CLAUDE.md): does not feed compute_C or any P1-P4
-    # verdict, which stay pooled across both sets exactly as before.
+    task_set: str  # "mbpp" or "lbpp" — see tasks.py.
+    scale_format: str  # key into config.SCALE_FORMATS
     scale_direction: str
     low_vignette_first: bool
     # Condition V: self-report and both anchors, one shared context.
@@ -66,6 +80,13 @@ class Observation:
     passes_visible: bool
     executes_cleanly: bool
     code_extracted: bool
+    # Why extraction failed, when it did (pilot.extract). Distinguishes "our
+    # output ceiling cut the reply off" from "the model emitted junk".
+    codegen_failure_reason: str | None = None
+
+    @property
+    def scale(self) -> config.ScaleFormat:
+        return config.SCALE_FORMATS[self.scale_format]
 
 
 @dataclass(frozen=True)
@@ -79,17 +100,37 @@ class Criterion:
 
 
 @dataclass(frozen=True)
-class PilotReport:
+class Validity:
+    """One (model, format) cell's §2 validity screen result."""
+
+    model: str
+    scale_format: str
+    valid: bool
+    reason: str
+    n_usable: int
+    z_lo_range: tuple[float, float] | None
+    z_hi_range: tuple[float, float] | None
+
+
+@dataclass(frozen=True)
+class Report:
+    scale_format: str
     tie_rule: str
     criteria: list[Criterion]
     diagnostics: dict[str, dict[str, object]]
     c_distribution: dict[str, dict[str, object]]
     tolerance_firing: dict[str, object]
+    validity: list[Validity]
+
+    @property
+    def all_cells_valid(self) -> bool:
+        return bool(self.validity) and all(v.valid for v in self.validity)
 
     @property
     def go(self) -> bool:
-        """GO requires P1, P2 and P3. P4 is reported but does not block."""
-        return all(c.verdict for c in self.criteria if c.criterion_id != "P4")
+        """GO requires P1, P2, P3 and every cell Valid. P4 does not block."""
+        criteria_ok = all(c.verdict for c in self.criteria if c.criterion_id != "P4")
+        return criteria_ok and self.all_cells_valid
 
     def verdicts(self) -> dict[str, bool]:
         return {c.criterion_id: c.verdict for c in self.criteria}
@@ -102,8 +143,8 @@ def _orient(draw: int, direction: str) -> int:
     """Identity. Validates `direction`; deliberately does not transform `draw`.
 
     DESIGN.md §3 fixes the number-to-label mapping (1 = Very unlikely ... 5 =
-    Very likely) and randomises only the order the five lines are *printed* in.
-    A reply of 5 therefore means "Very likely" under both directions, so there is
+    Very likely) and randomises only the order the lines are *printed* in. A
+    reply of 5 therefore means "Very likely" under both directions, so there is
     no frame to convert between. Subtracting the draw from 6 here silently
     inverted every descending observation: it turned 39/39 clean anchor orderings
     into 19 misorderings and made P2 fail on the first real run.
@@ -118,14 +159,23 @@ def _orient(draw: int, direction: str) -> int:
     return draw
 
 
-def _valid_draws(draws: list[int | None], direction: str) -> list[int]:
+def _valid_draws(obs: Observation, name: str) -> list[int]:
+    """In-range, parseable draws of one field, oriented to a common frame.
+
+    Takes the Observation rather than a bare list so the range bounds always
+    come from that observation's own scale format; a caller cannot forget to
+    pass it.
+    """
+    scale = obs.scale
     return [
-        _orient(d, direction) for d in draws if d is not None and _MIN_POINT <= d <= _MAX_POINT
+        _orient(d, obs.scale_direction)
+        for d in getattr(obs, name)
+        if d is not None and scale.in_range(d)
     ]
 
 
-def _mean(draws: list[int | None], direction: str) -> float | None:
-    valid = _valid_draws(draws, direction)
+def _mean(obs: Observation, name: str) -> float | None:
+    valid = _valid_draws(obs, name)
     return sum(valid) / len(valid) if valid else None
 
 
@@ -142,13 +192,30 @@ def _by_model_and_source(observations: list[Observation]) -> dict[str, list[Obse
     Reporting only. `_p1`/`_p2`/`_p4`/`_diagnostics` treat their `grouped` key
     purely as a table-column label, so passing this grouping through them
     reuses their computations completely unchanged — it does not touch
-    compute_C, any threshold constant, or the pooled GO verdict, which is
-    still computed on `_by_model` in `analyze()` below.
+    compute_C, any threshold, or the pooled GO verdict.
     """
     grouped: dict[str, list[Observation]] = {}
     for obs in observations:
         grouped.setdefault(f"{obs.model} · {obs.task_set}", []).append(obs)
     return grouped
+
+
+def _by_format(observations: list[Observation]) -> dict[str, list[Observation]]:
+    grouped: dict[str, list[Observation]] = {}
+    for obs in observations:
+        grouped.setdefault(obs.scale_format, []).append(obs)
+    return grouped
+
+
+def _single_format(observations: list[Observation]) -> config.ScaleFormat:
+    names = {o.scale_format for o in observations}
+    if len(names) != 1:
+        raise ValueError(
+            "analyze() takes one scale format at a time; got "
+            f"{sorted(names)}. Pooling formats would average values that are "
+            "not on the same scale — split with _by_format first."
+        )
+    return config.SCALE_FORMATS[names.pop()]
 
 
 def _rate(numerator: int, denominator: int) -> float | None:
@@ -159,29 +226,91 @@ def _sd(values: list[float]) -> float | None:
     return stdev(values) if len(values) >= 2 else None
 
 
+def _spread(values: list[float]) -> float | None:
+    return max(values) - min(values) if len(values) >= 2 else None
+
+
+# --- §2 validity screen ------------------------------------------------------
+
+
+def _validity(
+    grouped: dict[str, list[Observation]], scale: config.ScaleFormat
+) -> list[Validity]:
+    """Marks each (model, format) cell Valid or Invalid (DESIGN.md §2).
+
+    Invalid iff *both* anchors are constant across the cell, to within the
+    format's equality tolerance — that is the exact condition under which `C`
+    reduces to a monotone recoding of `y`. One constant anchor still leaves a
+    varying threshold, so it is not vacuous and is not flagged here (it is
+    visible in P2/P3 instead).
+    """
+    out: list[Validity] = []
+    for model, obs_list in grouped.items():
+        lows = [m for m in (_mean(o, "z_lo_draws") for o in obs_list) if m is not None]
+        highs = [m for m in (_mean(o, "z_hi_draws") for o in obs_list) if m is not None]
+        n_usable = min(len(lows), len(highs))
+
+        lo_spread = _spread(lows)
+        hi_spread = _spread(highs)
+
+        if n_usable < 2:
+            valid, reason = False, (
+                f"undetermined: only {n_usable} observation(s) with both anchors "
+                "usable, so constancy cannot be assessed"
+            )
+        else:
+            lo_constant = lo_spread is not None and lo_spread <= scale.tolerance
+            hi_constant = hi_spread is not None and hi_spread <= scale.tolerance
+            if lo_constant and hi_constant:
+                valid = False
+                reason = (
+                    f"INVALID: both anchors constant to within tolerance "
+                    f"{scale.tolerance:g} (z_lo ≡ {lows[0]:g}, z_hi ≡ {highs[0]:g}). "
+                    "C is a monotone recoding of y here, so every rank-based "
+                    "statistic is invariant by construction (DESIGN.md §2) and "
+                    "any apparent effect is an artefact of the recoding."
+                )
+            else:
+                valid = True
+                reason = (
+                    f"valid: anchors vary across observations (z_lo spread "
+                    f"{lo_spread:g}, z_hi spread {hi_spread:g}, tolerance "
+                    f"{scale.tolerance:g})"
+                )
+
+        out.append(
+            Validity(
+                model=model,
+                scale_format=scale.name,
+                valid=valid,
+                reason=reason,
+                n_usable=n_usable,
+                z_lo_range=(min(lows), max(lows)) if lows else None,
+                z_hi_range=(min(highs), max(highs)) if highs else None,
+            )
+        )
+    return out
+
+
 # --- P1: self-reports vary across tasks -------------------------------------
 
 
-def _p1(grouped: dict[str, list[Observation]]) -> Criterion:
+def _p1(grouped: dict[str, list[Observation]], scale: config.ScaleFormat) -> Criterion:
     per_model: dict[str, dict[str, object]] = {}
     passes = []
 
     for model, obs_list in grouped.items():
         points: list[int] = []
         for obs in obs_list:
-            points.extend(_valid_draws(obs.y_n_draws, obs.scale_direction))
-        means = [
-            m
-            for m in (_mean(o.y_n_draws, o.scale_direction) for o in obs_list)
-            if m is not None
-        ]
+            points.extend(_valid_draws(obs, "y_n_draws"))
+        means = [m for m in (_mean(o, "y_n_draws") for o in obs_list) if m is not None]
 
         distinct = len(set(points))
         sd = _sd(means)
         ok = (
             distinct >= config.P1_MIN_DISTINCT_SCALE_POINTS
             and sd is not None
-            and sd >= config.P1_MIN_SD
+            and sd >= scale.p1_min_sd
         )
         passes.append(ok)
 
@@ -191,8 +320,14 @@ def _p1(grouped: dict[str, list[Observation]]) -> Criterion:
             "SD across tasks": sd,
             "mean self-report": sum(means) / len(means) if means else None,
         }
-        for point in sorted(config.SCALE_POINTS):
-            metrics[f"draws at {point} ({config.SCALE_POINTS[point]})"] = points.count(point)
+        if scale.fully_labelled:
+            for point in sorted(scale.labels):
+                metrics[f"draws at {point} ({scale.labels[point]})"] = points.count(point)
+        else:
+            metrics["draw range (min-max)"] = (
+                f"{min(points)}-{max(points)}" if points else None
+            )
+            metrics["distinct per-task means"] = len(set(means))
         metrics["verdict"] = ok
         per_model[model] = metrics
 
@@ -201,9 +336,13 @@ def _p1(grouped: dict[str, list[Observation]]) -> Criterion:
         statement="Self-reports vary across tasks",
         threshold=(
             f">= {config.P1_MIN_DISTINCT_SCALE_POINTS} distinct scale points AND "
-            f"SD >= {config.P1_MIN_SD}. Computed on condition N, the "
-            "uncontaminated raw self-report; distinct points are counted over "
-            "individual draws, SD over per-task means."
+            f"SD >= {scale.p1_min_sd:g} "
+            f"({config.P1_MIN_SD_FRACTION_OF_WIDTH:g} x width {scale.width}). "
+            "Computed on condition N, the uncontaminated raw self-report; "
+            "distinct points are counted over individual draws, SD over "
+            "per-task means. The distinct-point count is absolute across "
+            "formats and is therefore easier to clear on a finer scale — see "
+            "DESIGN.md §9."
         ),
         verdict=bool(passes) and all(passes),
         per_model=per_model,
@@ -213,28 +352,30 @@ def _p1(grouped: dict[str, list[Observation]]) -> Criterion:
 # --- P2: vignettes ordered correctly ----------------------------------------
 
 
-def _p2(grouped: dict[str, list[Observation]], tie_rule: str) -> Criterion:
+def _p2(
+    grouped: dict[str, list[Observation]], tie_rule: str, scale: config.ScaleFormat
+) -> Criterion:
     per_model: dict[str, dict[str, object]] = {}
     passes = []
 
     for model, obs_list in grouped.items():
         clean = tie = misorder = usable = ambiguous = 0
         for obs in obs_list:
-            z_lo = _mean(obs.z_lo_draws, obs.scale_direction)
-            z_hi = _mean(obs.z_hi_draws, obs.scale_direction)
+            z_lo = _mean(obs, "z_lo_draws")
+            z_hi = _mean(obs, "z_hi_draws")
             if z_lo is None or z_hi is None:
                 continue
             usable += 1
-            if abs(z_lo - z_hi) <= config.TOLERANCE:
+            if abs(z_lo - z_hi) <= scale.tolerance:
                 tie += 1
             elif z_lo > z_hi:
                 misorder += 1
             else:
                 clean += 1
 
-            y_v = _mean(obs.y_v_draws, obs.scale_direction)
-            lower = compute_C(y_v, z_lo, z_hi, "lower")
-            upper = compute_C(y_v, z_lo, z_hi, "upper")
+            y_v = _mean(obs, "y_v_draws")
+            lower = compute_C(y_v, z_lo, z_hi, "lower", scale.tolerance)
+            upper = compute_C(y_v, z_lo, z_hi, "upper", scale.tolerance)
             if lower is not None and lower != upper:
                 ambiguous += 1
 
@@ -262,7 +403,9 @@ def _p2(grouped: dict[str, list[Observation]], tie_rule: str) -> Criterion:
         statement="Vignettes are ordered correctly",
         threshold=(
             f"misorder_rate <= {config.P2_MAX_MISORDER_RATE:.0%} AND tie_rate <= "
-            f"{config.P2_MAX_TIE_RATE:.0%}. Ties use TOLERANCE={config.TOLERANCE}. "
+            f"{config.P2_MAX_TIE_RATE:.0%}. Ties use tolerance "
+            f"{scale.tolerance:g} "
+            f"({config.TOLERANCE_FRACTION_OF_WIDTH:g} x width {scale.width}). "
             "ambiguous_C_rate is the share of observations where the lower and "
             "upper bound of C disagree; it is reported, not thresholded."
         ),
@@ -274,22 +417,14 @@ def _p2(grouped: dict[str, list[Observation]], tie_rule: str) -> Criterion:
 # --- P3: models differ in scale use -----------------------------------------
 
 
-def _p3(grouped: dict[str, list[Observation]]) -> Criterion:
+def _p3(grouped: dict[str, list[Observation]], scale: config.ScaleFormat) -> Criterion:
     per_model: dict[str, dict[str, object]] = {}
     z_lo_means: dict[str, float] = {}
     z_hi_means: dict[str, float] = {}
 
     for model, obs_list in grouped.items():
-        lows = [
-            m
-            for m in (_mean(o.z_lo_draws, o.scale_direction) for o in obs_list)
-            if m is not None
-        ]
-        highs = [
-            m
-            for m in (_mean(o.z_hi_draws, o.scale_direction) for o in obs_list)
-            if m is not None
-        ]
+        lows = [m for m in (_mean(o, "z_lo_draws") for o in obs_list) if m is not None]
+        highs = [m for m in (_mean(o, "z_hi_draws") for o in obs_list) if m is not None]
         mean_low = sum(lows) / len(lows) if lows else None
         mean_high = sum(highs) / len(highs) if highs else None
         if mean_low is not None:
@@ -298,23 +433,20 @@ def _p3(grouped: dict[str, list[Observation]]) -> Criterion:
             z_hi_means[model] = mean_high
         per_model[model] = {"mean z_lo": mean_low, "mean z_hi": mean_high}
 
-    spread_low = (
-        max(z_lo_means.values()) - min(z_lo_means.values()) if len(z_lo_means) >= 2 else None
-    )
-    spread_high = (
-        max(z_hi_means.values()) - min(z_hi_means.values()) if len(z_hi_means) >= 2 else None
-    )
+    spread_low = _spread(list(z_lo_means.values()))
+    spread_high = _spread(list(z_hi_means.values()))
     ok = any(
-        s is not None and s >= config.P3_MIN_SCALE_POINT_DIFFERENCE
-        for s in (spread_low, spread_high)
+        s is not None and s >= scale.p3_min_difference for s in (spread_low, spread_high)
     )
 
     return Criterion(
         criterion_id="P3",
         statement="Models differ from each other in scale use",
         threshold=(
-            f">= {config.P3_MIN_SCALE_POINT_DIFFERENCE} scale points apart on mean "
-            "z_lo OR mean z_hi (max - min across models)"
+            f">= {scale.p3_min_difference:g} scale points "
+            f"({config.P3_MIN_DIFFERENCE_FRACTION_OF_WIDTH:g} x width "
+            f"{scale.width}) apart on mean z_lo OR mean z_hi (max - min across "
+            "models, within this format)"
         ),
         verdict=ok,
         per_model=per_model,
@@ -328,7 +460,7 @@ def _p3(grouped: dict[str, list[Observation]]) -> Criterion:
 # --- P4: response consistency across self/other -----------------------------
 
 
-def _p4(grouped: dict[str, list[Observation]]) -> Criterion:
+def _p4(grouped: dict[str, list[Observation]], scale: config.ScaleFormat) -> Criterion:
     per_model: dict[str, dict[str, object]] = {}
     passes = []
 
@@ -337,8 +469,8 @@ def _p4(grouped: dict[str, list[Observation]]) -> Criterion:
         selfs = []
         others = []
         for obs in obs_list:
-            self_rating = _mean(obs.y_n_draws, obs.scale_direction)
-            other_rating = _mean(obs.other_draws, obs.scale_direction)
+            self_rating = _mean(obs, "y_n_draws")
+            other_rating = _mean(obs, "other_draws")
             if self_rating is None or other_rating is None:
                 continue
             selfs.append(self_rating)
@@ -348,7 +480,7 @@ def _p4(grouped: dict[str, list[Observation]]) -> Criterion:
         mean_self = sum(selfs) / len(selfs) if selfs else None
         mean_other = sum(others) / len(others) if others else None
         signed_gap = sum(gaps) / len(gaps) if gaps else None
-        ok = signed_gap is not None and abs(signed_gap) <= config.P4_MAX_ABS_GAP
+        ok = signed_gap is not None and abs(signed_gap) <= scale.p4_max_abs_gap
         passes.append(ok)
 
         per_model[model] = {
@@ -363,9 +495,11 @@ def _p4(grouped: dict[str, list[Observation]]) -> Criterion:
         criterion_id="P4",
         statement="Response consistency across self/other",
         threshold=(
-            f"|mean signed gap| <= {config.P4_MAX_ABS_GAP} scale points. Compared "
-            "against condition N, which like the probe carries no vignettes. "
-            "Does not block GO; a failure is a named limitation."
+            f"|mean signed gap| <= {scale.p4_max_abs_gap:g} scale points "
+            f"({config.P4_MAX_ABS_GAP_FRACTION_OF_WIDTH:g} x width "
+            f"{scale.width}). Compared against condition N, which like the probe "
+            "carries no vignettes. Does not block GO; a failure is a named "
+            "limitation."
         ),
         verdict=bool(passes) and all(passes),
         per_model=per_model,
@@ -381,17 +515,21 @@ def _diagnostics(grouped: dict[str, list[Observation]]) -> dict[str, dict[str, o
     for model, obs_list in grouped.items():
         total_draws = parse_failures = off_scale = 0
         per_question: dict[str, int] = {}
+        reasons: dict[str, int] = {}
         for obs in obs_list:
+            scale = obs.scale
             for name in RATING_FIELDS:
                 draws = getattr(obs, name)
                 failures = sum(1 for d in draws if d is None)
-                off = sum(
-                    1 for d in draws if d is not None and not _MIN_POINT <= d <= _MAX_POINT
-                )
+                off = sum(1 for d in draws if d is not None and not scale.in_range(d))
                 total_draws += len(draws)
                 parse_failures += failures
                 off_scale += off
                 per_question[name] = per_question.get(name, 0) + failures + off
+            if obs.codegen_failure_reason:
+                reasons[obs.codegen_failure_reason] = (
+                    reasons.get(obs.codegen_failure_reason, 0) + 1
+                )
 
         n = len(obs_list)
         visible_only = sum(1 for o in obs_list if o.passes_visible and not o.passes_hidden)
@@ -414,22 +552,25 @@ def _diagnostics(grouped: dict[str, list[Observation]]) -> dict[str, dict[str, o
         }
         for name, count in per_question.items():
             metrics[f"unusable draws: {name}"] = count
+        for reason, count in sorted(reasons.items()):
+            metrics[f"codegen rejected: {reason}"] = count
         out[model] = metrics
 
     return out
 
 
 def _c_distribution(
-    grouped: dict[str, list[Observation]], tie_rule: str
+    grouped: dict[str, list[Observation]], tie_rule: str, scale: config.ScaleFormat
 ) -> dict[str, dict[str, object]]:
     out: dict[str, dict[str, object]] = {}
     for model, obs_list in grouped.items():
         values = [
             compute_C(
-                _mean(o.y_v_draws, o.scale_direction),
-                _mean(o.z_lo_draws, o.scale_direction),
-                _mean(o.z_hi_draws, o.scale_direction),
+                _mean(o, "y_v_draws"),
+                _mean(o, "z_lo_draws"),
+                _mean(o, "z_hi_draws"),
                 tie_rule,
+                scale.tolerance,
             )
             for o in obs_list
         ]
@@ -439,16 +580,16 @@ def _c_distribution(
             "C unavailable": len(values) - len(usable),
             "mean C": sum(usable) / len(usable) if usable else None,
         }
-        for point in sorted(config.SCALE_POINTS):
+        for point in C_POINTS:
             metrics[f"C = {point}"] = usable.count(float(point))
         out[model] = metrics
     return out
 
 
 def _tolerance_firing(
-    grouped: dict[str, list[Observation]], tie_rule: str
+    grouped: dict[str, list[Observation]], tie_rule: str, scale: config.ScaleFormat
 ) -> dict[str, object]:
-    """How often the TOLERANCE window decided an equality (DESIGN.md §5).
+    """How often the tolerance window decided an equality (DESIGN.md §5).
 
     Runs its own single pass so the denominator is one call per observation;
     the other metrics call compute_C more than once each, which would inflate it.
@@ -457,10 +598,11 @@ def _tolerance_firing(
     for obs_list in grouped.values():
         for obs in obs_list:
             compute_C(
-                _mean(obs.y_v_draws, obs.scale_direction),
-                _mean(obs.z_lo_draws, obs.scale_direction),
-                _mean(obs.z_hi_draws, obs.scale_direction),
+                _mean(obs, "y_v_draws"),
+                _mean(obs, "z_lo_draws"),
+                _mean(obs, "z_hi_draws"),
                 tie_rule,
+                scale.tolerance,
             )
     counts = tolerance_counts()
     return {
@@ -482,7 +624,7 @@ def _order_effects(grouped: dict[str, list[Observation]]) -> dict[str, dict[str,
             subset = [
                 m
                 for m in (
-                    _mean(o.y_n_draws, o.scale_direction)
+                    _mean(o, "y_n_draws")
                     for o in obs_list
                     if o.scale_direction == direction
                 )
@@ -498,7 +640,7 @@ def _order_effects(grouped: dict[str, list[Observation]]) -> dict[str, dict[str,
                 subset = [
                     m
                     for m in (
-                        _mean(getattr(o, anchor), o.scale_direction)
+                        _mean(o, anchor)
                         for o in obs_list
                         if o.low_vignette_first is low_first
                     )
@@ -515,14 +657,23 @@ def _order_effects(grouped: dict[str, list[Observation]]) -> dict[str, dict[str,
 # --- Assembly ---------------------------------------------------------------
 
 
-def analyze(observations: list[Observation], tie_rule: str) -> PilotReport:
+def analyze(observations: list[Observation], tie_rule: str) -> Report:
+    """Analyses one scale format. Raises on a mixed-format list."""
+    scale = _single_format(observations)
     grouped = _by_model(observations)
-    return PilotReport(
+    return Report(
+        scale_format=scale.name,
         tie_rule=tie_rule,
-        criteria=[_p1(grouped), _p2(grouped, tie_rule), _p3(grouped), _p4(grouped)],
+        criteria=[
+            _p1(grouped, scale),
+            _p2(grouped, tie_rule, scale),
+            _p3(grouped, scale),
+            _p4(grouped, scale),
+        ],
         diagnostics=_diagnostics(grouped),
-        c_distribution=_c_distribution(grouped, tie_rule),
-        tolerance_firing=_tolerance_firing(grouped, tie_rule),
+        c_distribution=_c_distribution(grouped, tie_rule, scale),
+        tolerance_firing=_tolerance_firing(grouped, tie_rule, scale),
+        validity=_validity(grouped, scale),
     )
 
 
@@ -549,8 +700,9 @@ def _table(per_model: dict[str, dict[str, object]]) -> list[str]:
     if not per_model:
         return ["_No observations._", ""]
     models = list(per_model)
+    columns = list(dict.fromkeys(k for m in models for k in per_model[m]))
     rows = [f"| Metric | {' | '.join(models)} |", f"|---|{'---|' * len(models)}"]
-    for metric in per_model[models[0]]:
+    for metric in columns:
         cells = [_fmt_metric(metric, per_model[m].get(metric)) for m in models]
         rows.append(f"| {metric} | {' | '.join(cells)} |")
     rows.append("")
@@ -565,62 +717,91 @@ def _kv_table(values: dict[str, object]) -> list[str]:
     return rows
 
 
-def render_report(
-    observations: list[Observation],
-    report_lower: PilotReport,
-    report_upper: PilotReport,
-) -> str:
+def _validity_table(validity: list[Validity]) -> list[str]:
+    if not validity:
+        return ["_No cells._", ""]
+    rows = [
+        "| Model | Valid | n with both anchors | z_lo range | z_hi range | Note |",
+        "|---|---|---|---|---|---|",
+    ]
+    for v in validity:
+        lo = f"{v.z_lo_range[0]:g}–{v.z_lo_range[1]:g}" if v.z_lo_range else "n/a"
+        hi = f"{v.z_hi_range[0]:g}–{v.z_hi_range[1]:g}" if v.z_hi_range else "n/a"
+        rows.append(
+            f"| {v.model} | {'**VALID**' if v.valid else '**INVALID**'} | "
+            f"{v.n_usable} | {lo} | {hi} | {v.reason} |"
+        )
+    rows.append("")
+    return rows
+
+
+def _format_section(
+    observations: list[Observation], lower: Report, upper: Report
+) -> list[str]:
+    scale = _single_format(observations)
     grouped = _by_model(observations)
-    task_sets = {o.task_id: o.task_set for o in observations}
-    source_counts = {"mbpp": 0, "lbpp": 0}
-    for source in task_sets.values():
-        source_counts[source] = source_counts.get(source, 0) + 1
-    lines: list[str] = [
-        "# Pilot report",
+    lower_verdicts = lower.verdicts()
+    upper_verdicts = upper.verdicts()
+
+    lines = [
+        f"# Format `{scale.name}`",
         "",
-        f"2 models x {len(task_sets)} tasks "
-        f"({source_counts.get('mbpp', 0)} MBPP + {source_counts.get('lbpp', 0)} LBPP), "
-        f"{len(observations)} observations. Thresholds are DESIGN.md §9, fixed "
-        "before the numbers were seen. No interpretation is added here.",
+        f"Scale {scale.min_point}–{scale.max_point} (width {scale.width}), "
+        f"{'fully labelled' if scale.fully_labelled else 'endpoints labelled only'}: "
+        f"{dict(scale.labels)}. "
+        f"Answer instruction: {scale.answer_instruction!r}. "
+        f"Rating token cap: {scale.max_output_tokens_rating}.",
         "",
-        "Not computed, per DESIGN.md §9: AUROC, correlations, variance ratios, "
-        "significance tests.",
+        f"Width-relative thresholds (DESIGN.md §9): P1 SD >= {scale.p1_min_sd:g}, "
+        f"P3 >= {scale.p3_min_difference:g}, P4 <= {scale.p4_max_abs_gap:g}, "
+        f"equality tolerance {scale.tolerance:g}.",
         "",
-        "## Verdict",
+        f"{len(grouped)} models x {len({o.task_id for o in observations})} tasks, "
+        f"{len(observations)} observations.",
+        "",
+        "## Validity screen (DESIGN.md §2)",
+        "",
+        "A cell is Invalid iff BOTH anchors are constant across its "
+        "observations, in which case C is a monotone recoding of y and every "
+        "rank-based statistic is invariant by construction. Invalid cells are "
+        "reported, not filtered: their observations remain in every table "
+        "below, and an Invalid cell cannot produce a GO.",
         "",
     ]
+    lines += _validity_table(lower.validity)
 
-    lower_verdicts = report_lower.verdicts()
-    upper_verdicts = report_upper.verdicts()
+    lines += ["## Verdict", ""]
     lines += [
         "| Criterion | Statement | tie_rule=lower | tie_rule=upper |",
         "|---|---|---|---|",
     ]
-    for criterion in report_lower.criteria:
+    for criterion in lower.criteria:
         cid = criterion.criterion_id
         lines.append(
             f"| {cid} | {criterion.statement} | {_fmt(lower_verdicts[cid])} | "
             f"{_fmt(upper_verdicts[cid])} |"
         )
     lines += [
-        f"| **GO** | Requires P1, P2 and P3 | {_fmt(report_lower.go)} | "
-        f"{_fmt(report_upper.go)} |",
+        f"| Validity | Every cell Valid (§2) | {_fmt(lower.all_cells_valid)} | "
+        f"{_fmt(upper.all_cells_valid)} |",
+        f"| **GO** | Requires P1, P2, P3 and all cells Valid | "
+        f"{_fmt(lower.go)} | {_fmt(upper.go)} |",
         "",
-        f"Verdicts change between bound choices: "
-        f"**{'YES' if lower_verdicts != upper_verdicts or report_lower.go != report_upper.go else 'NO'}**. "
+        "Verdicts change between bound choices: "
+        f"**{'YES' if lower_verdicts != upper_verdicts or lower.go != upper.go else 'NO'}**. "
         "No P1–P4 threshold is a function of C, so the two runs cannot disagree "
         "on a verdict; the bound choice affects the C distribution below and "
         "ambiguous_C_rate, which is where DESIGN.md §5's robustness check lives.",
         "",
     ]
-    if not report_lower.criteria[3].verdict:
+    if not lower.criteria[3].verdict:
         lines += [
             "P4 FAILED. It does not block GO, and is recorded here as a named "
             "limitation that changes how the result must be framed.",
             "",
         ]
 
-    for criterion in report_lower.criteria:
+    for criterion in lower.criteria:
         lines += [
             f"## {criterion.criterion_id} — {criterion.statement}",
             "",
@@ -633,56 +814,113 @@ def render_report(
         if criterion.overall:
             lines += _kv_table(criterion.overall)
 
-    lines += ["## Diagnostics", ""] + _table(report_lower.diagnostics)
+    lines += ["## Diagnostics", ""] + _table(lower.diagnostics)
     lines += [
         "## Tolerance firing (DESIGN.md §5)",
         "",
-        f"Counted over all models, one compute_C call per observation, "
-        f"TOLERANCE={config.TOLERANCE}.",
+        f"All models, one compute_C call per observation, tolerance "
+        f"{scale.tolerance:g}.",
         "",
-    ] + _kv_table(report_lower.tolerance_firing)
+    ] + _kv_table(lower.tolerance_firing)
     lines += ["## Order effects (reported, not thresholded)", ""] + _table(
         _order_effects(grouped)
     )
     lines += [
         "## Rescaled C distribution",
         "",
-        f"### tie_rule = lower",
+        "C has five categories in every format: two anchors partition the line "
+        "into five regions (DESIGN.md §5). This is not the input scale.",
         "",
-    ] + _table(report_lower.c_distribution)
-    lines += [f"### tie_rule = upper", ""] + _table(report_upper.c_distribution)
+        "### tie_rule = lower",
+        "",
+    ] + _table(lower.c_distribution)
+    lines += ["### tie_rule = upper", ""] + _table(upper.c_distribution)
 
     grouped_ms = _by_model_and_source(observations)
     lines += [
         "## Task-set comparison (MBPP vs LBPP)",
         "",
-        "Diagnostic only, added 2026-08-14 alongside the LBPP task set. Reuses "
-        "the same P1/P2/P4/diagnostics computations as above, applied per "
-        "(model, task set) instead of pooled per model, so the two halves can "
-        "be compared directly. Does not feed the GO verdict, which stays "
-        "computed on the pooled full set above.",
+        "Diagnostic only. Reuses the same P1/P2/P4/diagnostics computations as "
+        "above, applied per (model, task set) instead of pooled per model. Does "
+        "not feed the GO verdict.",
         "",
         "### P1 — self-reports vary, by task set",
         "",
-    ] + _table(_p1(grouped_ms).per_model)
-    lines += [
-        "### P2 — vignette ordering, by task set",
-        "",
-    ] + _table(_p2(grouped_ms, report_lower.tie_rule).per_model)
-    lines += [
-        "### P4 — response consistency, by task set",
-        "",
-    ] + _table(_p4(grouped_ms).per_model)
+    ] + _table(_p1(grouped_ms, scale).per_model)
+    lines += ["### P2 — vignette ordering, by task set", ""] + _table(
+        _p2(grouped_ms, lower.tie_rule, scale).per_model
+    )
+    lines += ["### P4 — response consistency, by task set", ""] + _table(
+        _p4(grouped_ms, scale).per_model
+    )
     lines += ["### Diagnostics, by task set", ""] + _table(_diagnostics(grouped_ms))
+
+    return lines
+
+
+def render_report(observations: list[Observation]) -> str:
+    """One document: a cross-format summary, then one section per format."""
+    by_format = _by_format(observations)
+    ordered = [f.name for f in config.MAIN_SCALE_FORMATS if f.name in by_format]
+    ordered += [name for name in by_format if name not in ordered]
+
+    reports = {
+        name: (analyze(by_format[name], "lower"), analyze(by_format[name], "upper"))
+        for name in ordered
+    }
+
+    task_sets = {o.task_id: o.task_set for o in observations}
+    source_counts: dict[str, int] = {}
+    for source in task_sets.values():
+        source_counts[source] = source_counts.get(source, 0) + 1
+
+    lines = [
+        "# Report",
+        "",
+        f"{len({o.model for o in observations})} models x {len(task_sets)} tasks "
+        f"({source_counts.get('mbpp', 0)} MBPP + {source_counts.get('lbpp', 0)} LBPP) "
+        f"x {len(ordered)} scale formats, {len(observations)} observations. "
+        "Thresholds are DESIGN.md §9, fixed before the numbers were seen, and "
+        "expressed as fractions of each format's width so they mean the same "
+        "thing in all three. No interpretation is added here.",
+        "",
+        "Not computed, per DESIGN.md §9: AUROC, correlations, variance ratios, "
+        "significance tests.",
+        "",
+        "## Cross-format summary",
+        "",
+        "| Format | Width | P1 | P2 | P3 | P4 | All cells Valid | GO |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for name in ordered:
+        lower, _ = reports[name]
+        v = lower.verdicts()
+        scale = config.SCALE_FORMATS[name]
+        lines.append(
+            f"| `{name}` | {scale.width} | {_fmt(v['P1'])} | {_fmt(v['P2'])} | "
+            f"{_fmt(v['P3'])} | {_fmt(v['P4'])} | "
+            f"{_fmt(lower.all_cells_valid)} | {_fmt(lower.go)} |"
+        )
+    lines += [
+        "",
+        "Verdicts above are for tie_rule=lower; the per-format sections show "
+        "both bounds. A format disagreeing with another is a result about the "
+        "scale, not an error to be resolved — see DESIGN.md §3.",
+        "",
+    ]
+
+    for name in ordered:
+        lower, upper = reports[name]
+        lines += ["---", ""]
+        lines += _format_section(by_format[name], lower, upper)
 
     return "\n".join(lines) + "\n"
 
 
-def write_report(observations: list[Observation]) -> str:
-    """Runs the analysis under both bound choices and writes out/report.md."""
-    lower = analyze(observations, "lower")
-    upper = analyze(observations, "upper")
-    markdown = render_report(observations, lower, upper)
-    config.OUT_DIR.mkdir(parents=True, exist_ok=True)
-    (config.OUT_DIR / "report.md").write_text(markdown)
+def write_report(observations: list[Observation], path: Path | None = None) -> str:
+    """Renders every format under both bound choices and writes the report."""
+    markdown = render_report(observations)
+    target = path or (config.OUT_DIR / "report.md")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(markdown)
     return markdown

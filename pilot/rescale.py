@@ -51,8 +51,12 @@ robustness check (DESIGN.md §5, after He et al. 2017).
 ## Tolerance
 
 Inputs are means over `config.N_SAMPLES` draws, so they are continuous and exact
-equality is rare. Equality uses `config.TOLERANCE`. How often that tolerance
-fires is a reported diagnostic, not an internal detail: see `tolerance_counts`.
+equality is rare. Equality uses a tolerance passed in by the caller, which reads
+it off the scale format in use (`ScaleFormat.tolerance`, DESIGN.md §5/§9): it is
+proportional to the format's width, so "equal" means the same thing on a 1-5 and
+a 0-100 scale. The default reproduces the 5-point value, 0.01. How often the
+tolerance fires is a reported diagnostic, not an internal detail: see
+`tolerance_counts`.
 
 ## What this module must never become
 
@@ -65,9 +69,12 @@ property of this mathematics, not a bug to be patched here. See CLAUDE.md,
 
 from dataclasses import dataclass
 
-from pilot import config
-
 TIE_RULES = ("lower", "upper")
+
+# The 5-point value from DESIGN.md §5. Callers that know their scale format pass
+# `ScaleFormat.tolerance` instead; this default keeps the pilot's arithmetic and
+# the existing tests unchanged.
+DEFAULT_TOLERANCE = 0.01
 
 
 @dataclass(frozen=True)
@@ -97,8 +104,8 @@ def reset_tolerance_counts() -> None:
         _counts[key] = 0
 
 
-def _equal(a: float, b: float) -> bool:
-    return abs(a - b) <= config.TOLERANCE
+def _equal(a: float, b: float, tolerance: float) -> bool:
+    return abs(a - b) <= tolerance
 
 
 def compute_C(
@@ -106,12 +113,14 @@ def compute_C(
     z_lo: float | None,
     z_hi: float | None,
     tie_rule: str,
+    tolerance: float = DEFAULT_TOLERANCE,
 ) -> float | None:
-    """Rescales `y` against the anchors `z_lo`/`z_hi` onto the 5-point scale.
+    """Rescales `y` against the anchors `z_lo`/`z_hi` onto the 5-point `C`.
 
     `tie_rule` selects which bound to return where `C` is only
     interval-identified (tied or misordered anchors); it has no effect
-    otherwise. Returns None iff any input is None — a parse failure upstream
+    otherwise. `tolerance` is the format-relative equality window (DESIGN.md
+    §5). Returns None iff any input is None — a parse failure upstream
     (DESIGN.md §4) is not something to guess a rating for.
     """
     if tie_rule not in TIE_RULES:
@@ -120,10 +129,10 @@ def compute_C(
         return None
 
     _counts["calls"] += 1
-    if _equal(z_lo, z_hi):
+    if _equal(z_lo, z_hi, tolerance):
         _counts["z_lo_vs_z_hi"] += 1
 
-    if _equal(y, z_lo):
+    if _equal(y, z_lo, tolerance):
         _counts["y_vs_z_lo"] += 1
         from_lo = (2, 2)
     elif y < z_lo:
@@ -131,7 +140,7 @@ def compute_C(
     else:
         from_lo = (3, 5)
 
-    if _equal(y, z_hi):
+    if _equal(y, z_hi, tolerance):
         _counts["y_vs_z_hi"] += 1
         from_hi = (4, 4)
     elif y > z_hi:

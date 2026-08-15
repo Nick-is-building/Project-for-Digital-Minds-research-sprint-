@@ -51,28 +51,91 @@ This is a property of the mathematics, not a bug that can be worked around. Any
 implementation that reuses vignette ratings across contexts yields a guaranteed
 null result.
 
+### Validity screen (reported, not filtered)
+
+The paragraph above is a checkable property of the output, not only a warning
+about implementation. Eliciting the anchors freshly in every context is
+necessary but not sufficient: a model can be *asked* afresh every time and still
+return the same two numbers every time. The mathematics does not care why the
+anchors are constant.
+
+For each **(model, scale format)** cell: if `z_lo` is constant across every
+observation in that cell **and** `z_hi` is constant across every observation in
+that cell, then rescaling in that cell is provably vacuous. `C` is a monotone
+recoding of `y`, every rank-based statistic is invariant by construction, and any
+apparent effect is an artefact of the recoding rather than a finding.
+
+Such a cell is reported as **Invalid**.
+
+This is a reported result, not a filter applied silently. An Invalid cell is
+named in the output together with its constant anchor values. Its observations
+are not deleted, not imputed, and not quietly dropped from a pooled number —
+which would convert a visible instrument failure into an invisible one. "This
+model, in this format, does not distinguish a correct from an incorrect reference
+solution" is itself a finding about the model, and it is the single most likely
+way for this instrument to fail.
+
+Constancy is judged with the §5 equality tolerance at that format's width, so the
+screen is applied on the same scale as the rescaling it is checking.
+
 ---
 
 ## 3. The rating scale
 
-Five points, fixed wording:
+**Scale format is an experimental variable, not a fixed choice.** Three formats
+are run on the same tasks and the same models:
 
-```
-1 = Very unlikely
-2 = Unlikely
-3 = Uncertain
-4 = Likely
-5 = Very likely
-```
+| Format | Points | Labels |
+|---|---|---|
+| `p5` | 1–5 | 1 Very unlikely · 2 Unlikely · 3 Uncertain · 4 Likely · 5 Very likely |
+| `p7` | 1–7 | 1 Very unlikely · 2 Unlikely · 3 Somewhat unlikely · 4 Uncertain · 5 Somewhat likely · 6 Likely · 7 Very likely |
+| `s100` | 0–100 | endpoints labelled (0 Very unlikely, 100 Very likely), interior unlabelled |
 
-Cardinality is five and does not change. Wang, Zhou & Liu (arXiv:2608.08869,
-Aug 2026) tested ten frontier models on ordinal classification: every model was
-sensitive to label order, demonstration order and demonstration placement, and
-the corrections they tested did not reliably remedy it. Lower scale cardinality
-was the only intervention that consistently improved both accuracy and stability.
+`p5` is the originally locked format, retained unchanged, so the three-format run
+is a superset of the pilot rather than a replacement for it. `p7` is the
+Pinocchio Inventory format (Plisiecki et al., arXiv:2607.20082); using the
+established AI-welfare self-report format makes the welfare implication of a
+scale-use artefact concrete rather than generic. `s100` is the fine reference in
+which a graded signal was actually observed.
 
-Scale direction (`1→5` or `5→1`) is randomised per context and recorded, so that
-label-order sensitivity is measured rather than silently absorbed.
+Scale direction (ascending or descending) is randomised per context and recorded
+in **every** format, so that label-order sensitivity is measured within each
+format rather than silently absorbed.
+
+### Why this changed, and the tension it creates
+
+Cardinality was previously locked at five, citing Wang, Zhou & Liu
+(arXiv:2608.08869, Aug 2026): across ten frontier models on ordinal
+classification, every model was sensitive to label order, demonstration order and
+demonstration placement, the corrections they tested did not reliably remedy it,
+and *lower* cardinality was the only intervention that consistently improved both
+accuracy and stability.
+
+Our own pilot data points the other way. On the identical tasks and models, the
+5-point scale destroyed a graded self-report signal that the 0-100 scale
+preserved (`y` spread 89.8–95.0, 4–6 distinct values per model on 0-100, against
+a self-report pinned at the top of the 5-point scale).
+
+**Both findings are true and they are in tension.** The citation is kept rather
+than dropped, because the two results are not about the same property:
+
+- Wang et al. concerns **stability** — the same item re-presented with a
+  different label order should receive the same answer, and coarse scales are
+  more stable.
+- Our finding concerns **resolution near the ceiling** — a scale must be able to
+  represent variation that exists, and a coarse scale close to its top point
+  cannot.
+
+A format that is perfectly stable but has no resolution measures nothing. A
+format with high resolution but no stability measures noise. Neither result
+settles which failure mode dominates for self-reports of code correctness, and
+choosing one format on either authority would be assuming the answer. So the
+format is measured, and both failure modes are reported per format: resolution as
+P1 (§9), stability as the scale-direction order effect.
+
+If the two disagree — fine resolution only in `s100`, stability only in `p5` —
+that disagreement is the result, and it is reported as such rather than resolved
+by picking a favourite.
 
 ---
 
@@ -141,12 +204,21 @@ y  == z_hi          →  C = 4
 y  >  z_hi          →  C = 5
 ```
 
+`C` has five categories in **every** scale format of §3, and this is not a
+leftover from the 5-point scale: two anchors partition the line into exactly five
+regions (below, at, between, at, above), whichever scale `y`, `z_lo` and `z_hi`
+were measured on. The cardinality of `C` is a property of having two vignettes,
+not of the input scale.
+
 Tied (`z_lo == z_hi`) or misordered (`z_lo > z_hi`): the true value of `C` is an
 interval. Both bounds are computed using `lo = min(z_lo, z_hi)` and
 `hi = max(z_lo, z_hi)`.
 
 Because the inputs are sample means, exact equality is rare; equality comparisons
-use a tolerance of 0.01, and how often that tolerance fires is recorded.
+use a tolerance, and how often that tolerance fires is recorded. The tolerance is
+proportional to the format's width (§9): `0.0025 · W`, which is 0.01 on the
+5-point scale — the originally specified value — and 0.25 on 0-100. An absolute
+tolerance would make "equal" mean something different in each format.
 
 **The whole analysis is run twice — once taking the lower bound, once the upper —
 and agreement between the two is the robustness check.** He et al. (2017) treat
@@ -252,15 +324,50 @@ code is direct evidence of attribution gating.
 
 ### Thresholds — fixed before the numbers are seen
 
+P1, P3 and P4 were originally written as absolute scale points, calibrated to the
+5-point format, whose **width** `W = max − min` is 4. Absolute points are not
+comparable across the three formats of §3: 0.5 points is an eighth of the 5-point
+scale but a two-hundredth of the 0-100 scale, so one nominal threshold would be
+demanding in one format and near-automatic in another, and a per-format PASS/FAIL
+verdict would be an artefact of the format rather than a statement about the
+model.
+
+**The thresholds are therefore defined proportionally, as fractions of that
+format's width `W`.** The fractions are chosen to reproduce the original 5-point
+values exactly, so no locked pilot criterion changes value; only its expression
+does.
+
+| ID | Quantity | Fraction of `W` | `W=4` (p5) | `W=6` (p7) | `W=100` (s100) |
+|----|----------|-----------------|-----------|-----------|---------------|
+| P1 | min SD | 0.075 · W | 0.3 | 0.45 | 7.5 |
+| P3 | min anchor difference | 0.125 · W | 0.5 | 0.75 | 12.5 |
+| P4 | max \|self − other\| | 0.1875 · W | 0.75 | 1.125 | 18.75 |
+| §5 | equality tolerance | 0.0025 · W | 0.01 | 0.015 | 0.25 |
+
 | ID | PASS | FAIL |
 |----|------|------|
-| P1 | ≥3 distinct values AND SD ≥ 0.3 | ≤2 distinct values OR SD < 0.3 |
+| P1 | ≥3 distinct values AND SD ≥ 0.075·W | ≤2 distinct values OR SD < 0.075·W |
 | P2 | misorder ≤ 20 % AND ties ≤ 40 % | misorder > 20 % OR ties > 40 % |
-| P3 | ≥0.5 scale points apart on mean `z_lo` or mean `z_hi` | both differences < 0.5 |
-| P4 | \|self − other\| ≤ 0.75 scale points | > 0.75 |
+| P3 | ≥0.125·W apart on mean `z_lo` or mean `z_hi` | both differences < 0.125·W |
+| P4 | \|self − other\| ≤ 0.1875·W | > 0.1875·W |
+
+P2's thresholds are rates already and need no rescaling.
+
+**P1's distinct-value count stays absolute at 3, and that is a stated
+limitation.** A count has no unit, so there is no width to divide by — but the
+number of values *available* is not constant across formats (5, 7, 101). Three
+distinct values out of five is a far stronger requirement than three out of 101,
+so the count is easier to clear in a fine format, and cross-format P1 comparisons
+must be read on the SD column, not the count. The count is retained anyway
+because its job is to catch total collapse (Martorell & Bianchi,
+arXiv:2603.18893), which it does in every format.
 
 **GO** requires P1, P2 and P3. P4 failing does not block the main experiment but
 must be reported as a named limitation and changes how the result is framed.
+
+A cell marked **Invalid** by the §2 validity screen cannot produce a GO,
+regardless of P1–P4, because in that cell the quantity the criteria are about
+does not exist.
 
 ### What the pilot reports
 
@@ -272,6 +379,11 @@ P2: clean / tie / misorder rates. P3: mean `z_lo` and `z_hi` per model and their
 difference. P4: mean self- and other-rating and the signed gap.
 Order effects: self-report split by scale direction; vignette ratings split by
 presentation order.
+Validity screen (§2): every (model, format) cell explicitly marked Valid or
+Invalid, with the constant anchor values shown for Invalid cells.
+
+Every threshold is printed as both its fraction of `W` and its value in that
+format's points, so a verdict can be checked without recomputing it.
 
 **Not computed in the pilot:** AUROC, correlations, variance ratios, significance
 tests. Twenty tasks is far too few; any such number would be noise inviting
@@ -286,6 +398,13 @@ Only after a GO.
 Five models spanning capability tiers across at least two providers, 100 tasks.
 Simulation: with 5 models the effect was positive in 100 % of runs, with 3 in
 90 %; at 100 tasks 98 %, at 60 tasks 93 %.
+
+All three scale formats of §3 are run on the **same** tasks and the same models,
+so format is a within-subject variable. One solution per (model, task) is
+generated once and reused across the three formats: if each format re-generated
+its own solution, format and solution quality would be confounded and a format
+difference could not be attributed to the scale. Ground truth is therefore also
+computed once per (model, task) and shared.
 
 The primary comparison is **across models**: how well stated confidence tracks
 true accuracy, raw versus rescaled. In simulation of the realistic world — models

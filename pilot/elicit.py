@@ -1,14 +1,26 @@
 """Model elicitation: one interface, two providers behind it (DESIGN.md §6).
 
-`elicit(model, messages, n_samples)` makes n_samples independent calls at
+`elicit(model, messages, n_samples, ...)` makes n_samples independent calls at
 temperature 1.0, each replaying the identical `messages` prefix. Every call
-appends one line to pilot/out/raw.jsonl immediately after the response comes
-back (or the call fails) and before any parsing. Parsing is strict: a single
-integer, or None on failure — never a re-ask with different wording.
+appends one line to the raw log immediately after the response comes back (or
+the call fails) and before any parsing. Parsing is strict: a single integer, or
+None on failure — never a re-ask with different wording.
 
 Anthropic via its own SDK. Google via the native Gemini SDK's Interactions API
 (`client.interactions.create`; see CLAUDE.md "API facts") — not the OpenAI-
-compatibility layer, which rejects the new AQ.-prefix auth keys.
+compatibility layer, which rejects the new AQ.-prefix auth keys. Dispatch is on
+`config.PROVIDER`, not on identity against two model constants.
+
+`max_output_tokens` is passed in by the caller rather than looked up here,
+because the rating cap depends on the scale format in use (a 0-100 reply needs
+more room than a single digit) and a lookup would silently apply the wrong one.
+
+**Truncation is recorded, not inferred later.** A reply cut off at the output
+ceiling used to reach the code extractor as apparent model incompetence. Each
+raw-log line now carries `truncated` and, where the provider gives one, the
+`stop_reason`. On Gemini there is no finish_reason on the Interactions response
+and `max_output_tokens` is a *combined* budget for thinking and visible output,
+so truncation is inferred from thought+output approaching the ceiling.
 
 Requires ANTHROPIC_API_KEY and GOOGLE_API_KEY (or GEMINI_API_KEY) in the
 environment or a .env file at the project root.
@@ -19,6 +31,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -29,6 +42,8 @@ load_dotenv(config.PROJECT_ROOT / ".env")
 _INTEGER_RE = re.compile(r"^\s*(-?\d+)\s*$")
 
 _call_count = 0
+_call_budget = config.MAX_CALLS
+_raw_path = config.RAW_JSONL_PATH
 
 
 class CallBudgetExceeded(RuntimeError):
@@ -36,10 +51,39 @@ class CallBudgetExceeded(RuntimeError):
 
 
 @dataclass
-class TokenUsage:
+class CallResult:
+    text: str | None
     input_tokens: int | None
     output_tokens: int | None
     thought_tokens: int | None = None
+    cached_input_tokens: int | None = None
+    stop_reason: str | None = None
+    truncated: bool = False
+
+
+def set_call_budget(limit: int) -> None:
+    """Raises (or lowers) the process-wide API-call ceiling.
+
+    The pilot's 1200 is far below what the main experiment needs, and silently
+    patching config.MAX_CALLS would remove the guard without leaving a trace.
+    A runner calls this once, explicitly, and prints what it did.
+    """
+    global _call_budget
+    _call_budget = limit
+
+
+def set_raw_log_path(path: Path) -> None:
+    """Points the raw log at a different file (the main run keeps its own)."""
+    global _raw_path
+    _raw_path = path
+
+
+def raw_log_path() -> Path:
+    return _raw_path
+
+
+def call_count() -> int:
+    return _call_count
 
 
 def _parse_integer(text: str | None) -> int | None:
@@ -51,40 +95,74 @@ def _parse_integer(text: str | None) -> int | None:
 
 def _check_call_budget() -> None:
     global _call_count
-    if _call_count >= config.MAX_CALLS:
+    if _call_count >= _call_budget:
         raise CallBudgetExceeded(
-            f"MAX_CALLS ceiling ({config.MAX_CALLS}) reached; aborting before "
-            "making another API call."
+            f"Call ceiling ({_call_budget}) reached; aborting before making "
+            "another API call."
         )
     _call_count += 1
 
 
+# --- Anthropic ---------------------------------------------------------------
+
+
+def _anthropic_messages(messages: list[dict], cache_prefix: bool) -> list[dict]:
+    """Optionally marks the whole prompt as a cache breakpoint.
+
+    Only ever called with `cache_prefix=True` for a prompt this run sends more
+    than once verbatim. Placing a breakpoint on a prompt sent once would incur
+    the 1.25x cache-write multiplier with no subsequent read — i.e. it would
+    cost more than not caching. If the prompt is below the model's minimum
+    cacheable length (config.CACHE_MIN_PROMPT_TOKENS) the request is processed
+    uncached, with no error and no write premium.
+    """
+    if not cache_prefix or not messages:
+        return messages
+    head, last = messages[:-1], messages[-1]
+    return head + [
+        {
+            "role": last["role"],
+            "content": [
+                {
+                    "type": "text",
+                    "text": last["content"],
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        }
+    ]
+
+
 def _call_anthropic(
-    model: str, messages: list[dict], is_rating: bool
-) -> tuple[str, TokenUsage]:
+    model: str, messages: list[dict], max_output_tokens: int, cache_prefix: bool
+) -> CallResult:
     import anthropic
 
     client = anthropic.Anthropic(timeout=config.API_TIMEOUT_SECONDS)
-    max_tokens = (
-        config.MAX_OUTPUT_TOKENS_RATING if is_rating else config.MAX_OUTPUT_TOKENS_DEFAULT
-    )
     response = client.messages.create(
         model=model,
-        max_tokens=max_tokens,
+        max_tokens=max_output_tokens,
         temperature=config.TEMPERATURE,
-        messages=messages,
+        messages=_anthropic_messages(messages, cache_prefix),
     )
-    text = response.content[0].text
-    usage = TokenUsage(
-        input_tokens=response.usage.input_tokens,
-        output_tokens=response.usage.output_tokens,
+    usage = response.usage
+    text = response.content[0].text if response.content else ""
+    return CallResult(
+        text=text,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cached_input_tokens=getattr(usage, "cache_read_input_tokens", None),
+        stop_reason=response.stop_reason,
+        truncated=response.stop_reason == "max_tokens",
     )
-    return text, usage
+
+
+# --- Google ------------------------------------------------------------------
 
 
 def _call_google(
-    model: str, messages: list[dict], is_rating: bool
-) -> tuple[str, TokenUsage]:
+    model: str, messages: list[dict], max_output_tokens: int, is_rating: bool
+) -> CallResult:
     from google import genai
 
     client = genai.Client()
@@ -97,11 +175,7 @@ def _call_google(
         for m in messages
     ]
 
-    generation_config: dict = {
-        "max_output_tokens": (
-            config.MAX_OUTPUT_TOKENS_RATING if is_rating else config.MAX_OUTPUT_TOKENS_DEFAULT
-        )
-    }
+    generation_config: dict = {"max_output_tokens": max_output_tokens}
     if is_rating:
         generation_config["thinking_level"] = config.GOOGLE_RATING_THINKING_LEVEL
 
@@ -112,27 +186,48 @@ def _call_google(
         timeout=config.API_TIMEOUT_SECONDS,
     )
     usage = response.usage
-    token_usage = TokenUsage(
+    output_tokens = usage.total_output_tokens if usage else None
+    thought_tokens = usage.total_thought_tokens if usage else None
+
+    # No finish_reason exists on the Interactions response, and the ceiling is a
+    # combined thinking+output budget, so this is the only signal available.
+    spent = (output_tokens or 0) + (thought_tokens or 0)
+    truncated = spent >= max_output_tokens - config.GOOGLE_TRUNCATION_SLACK_TOKENS
+
+    return CallResult(
+        text=response.output_text,
         input_tokens=usage.total_input_tokens if usage else None,
-        output_tokens=usage.total_output_tokens if usage else None,
-        thought_tokens=usage.total_thought_tokens if usage else None,
+        output_tokens=output_tokens,
+        thought_tokens=thought_tokens,
+        cached_input_tokens=getattr(usage, "total_cached_content_tokens", None),
+        stop_reason=None,
+        truncated=truncated,
     )
-    return response.output_text, token_usage
 
 
 def _raw_call(
-    model: str, messages: list[dict], is_rating: bool
-) -> tuple[str, TokenUsage]:
-    if model == config.ANTHROPIC_MODEL:
-        return _call_anthropic(model, messages, is_rating)
-    if model == config.GOOGLE_MODEL:
-        return _call_google(model, messages, is_rating)
-    raise ValueError(f"Unknown model: {model!r}. Known: {config.PILOT_MODELS}")
+    model: str,
+    messages: list[dict],
+    max_output_tokens: int,
+    is_rating: bool,
+    cache_prefix: bool,
+) -> CallResult:
+    provider = config.PROVIDER.get(model)
+    if provider == config.ANTHROPIC:
+        return _call_anthropic(model, messages, max_output_tokens, cache_prefix)
+    if provider == config.GOOGLE:
+        # Gemini implicit caching is on by default for all 3.x models and needs
+        # no request-side flag, so `cache_prefix` has nothing to apply here.
+        return _call_google(model, messages, max_output_tokens, is_rating)
+    raise ValueError(
+        f"Unknown model: {model!r}. Add it to config.PROVIDER. "
+        f"Known: {sorted(config.PROVIDER)}"
+    )
 
 
 def _append_raw_line(record: dict) -> None:
-    config.OUT_DIR.mkdir(parents=True, exist_ok=True)
-    with open(config.RAW_JSONL_PATH, "a") as f:
+    _raw_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(_raw_path, "a") as f:
         f.write(json.dumps(record) + "\n")
 
 
@@ -141,20 +236,19 @@ def parse_rating(text: str | None) -> int | None:
     return _parse_integer(text)
 
 
-def elicit_text(
+def elicit_call(
     model: str,
     messages: list[dict],
+    max_output_tokens: int,
     is_rating: bool = False,
     sample_index: int = 0,
-) -> str | None:
-    """One call; returns the raw response text, or None if the call failed.
+    cache_prefix: bool = False,
+) -> CallResult:
+    """One call. Always returns a CallResult; `text is None` means it failed.
 
-    Used where the reply is not a rating (code generation) and where a reply
-    must be replayed verbatim as an assistant turn in a longer context, which
-    `str(parsed_integer)` would not preserve. Logs to raw.jsonl exactly as
-    `elicit` does.
-
-    Raises CallBudgetExceeded if config.MAX_CALLS would be exceeded.
+    Logs to the raw log exactly once, before any parsing, whether the call
+    succeeded or raised. Raises CallBudgetExceeded if the ceiling would be
+    exceeded — that is the one exception that propagates.
     """
     _check_call_budget()
 
@@ -163,73 +257,114 @@ def elicit_text(
         "model": model,
         "sample_index": sample_index,
         "is_rating": is_rating,
+        "max_output_tokens": max_output_tokens,
+        "cache_prefix": cache_prefix,
         "messages": messages,
     }
     try:
-        raw_text, usage = _raw_call(model, messages, is_rating)
-        record["raw_response"] = raw_text
+        result = _raw_call(model, messages, max_output_tokens, is_rating, cache_prefix)
         record["error"] = None
-        record["input_tokens"] = usage.input_tokens
-        record["output_tokens"] = usage.output_tokens
-        record["thought_tokens"] = usage.thought_tokens
     except Exception as exc:
-        raw_text = None
-        record["raw_response"] = None
+        result = CallResult(text=None, input_tokens=None, output_tokens=None)
         record["error"] = repr(exc)
-        record["input_tokens"] = None
-        record["output_tokens"] = None
-        record["thought_tokens"] = None
+
+    record["raw_response"] = result.text
+    record["input_tokens"] = result.input_tokens
+    record["output_tokens"] = result.output_tokens
+    record["thought_tokens"] = result.thought_tokens
+    record["cached_input_tokens"] = result.cached_input_tokens
+    record["stop_reason"] = result.stop_reason
+    record["truncated"] = result.truncated
 
     _append_raw_line(record)
-    return raw_text
+    return result
+
+
+def elicit_text(
+    model: str,
+    messages: list[dict],
+    max_output_tokens: int,
+    is_rating: bool = False,
+    sample_index: int = 0,
+    cache_prefix: bool = False,
+) -> str | None:
+    """`elicit_call` reduced to its reply text, for callers that need only that.
+
+    Used where a reply must be replayed verbatim as an assistant turn in a
+    longer context, which `str(parsed_integer)` would not preserve.
+    """
+    return elicit_call(
+        model, messages, max_output_tokens, is_rating, sample_index, cache_prefix
+    ).text
 
 
 def elicit(
     model: str,
     messages: list[dict],
     n_samples: int,
+    max_output_tokens: int,
     is_rating: bool = True,
+    cache_prefix: bool = False,
 ) -> list[int | None]:
     """Returns one parsed integer (or None on failure) per sample.
 
-    `is_rating` selects the rating-call cost/thinking profile (short output,
-    minimal Gemini thinking) versus the code-generation profile (default
-    thinking, larger output budget). Every call — success or failure — is
-    appended to raw.jsonl immediately, before the response text is parsed.
-
-    Raises CallBudgetExceeded if config.MAX_CALLS would be exceeded; already-
-    made calls in this batch remain logged.
+    Every sample replays the identical prefix, so `cache_prefix=True` is
+    correct here whenever the provider can cache at this prompt length: one
+    write followed by `n_samples - 1` reads.
     """
     return [
-        _parse_integer(elicit_text(model, messages, is_rating, sample_index))
+        _parse_integer(
+            elicit_text(
+                model,
+                messages,
+                max_output_tokens,
+                is_rating,
+                sample_index,
+                cache_prefix,
+            )
+        )
         for sample_index in range(n_samples)
     ]
 
 
 def print_usage_summary() -> None:
-    """Reads raw.jsonl and prints total calls and total tokens per model."""
+    """Reads the raw log and prints calls, tokens and truncations per model."""
     totals: dict[str, dict[str, int]] = defaultdict(
-        lambda: {"calls": 0, "input_tokens": 0, "output_tokens": 0, "thought_tokens": 0}
+        lambda: {
+            "calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "thought_tokens": 0,
+            "cached_input_tokens": 0,
+            "truncated": 0,
+            "errors": 0,
+        }
     )
 
-    if not config.RAW_JSONL_PATH.exists():
-        print("No raw.jsonl found; nothing to summarize.")
+    if not _raw_path.exists():
+        print(f"No {_raw_path.name} found; nothing to summarize.")
         return
 
-    with open(config.RAW_JSONL_PATH) as f:
+    with open(_raw_path) as f:
         for line in f:
             record = json.loads(line)
             model_totals = totals[record["model"]]
             model_totals["calls"] += 1
-            model_totals["input_tokens"] += record.get("input_tokens") or 0
-            model_totals["output_tokens"] += record.get("output_tokens") or 0
-            model_totals["thought_tokens"] += record.get("thought_tokens") or 0
+            for field in (
+                "input_tokens",
+                "output_tokens",
+                "thought_tokens",
+                "cached_input_tokens",
+            ):
+                model_totals[field] += record.get(field) or 0
+            model_totals["truncated"] += 1 if record.get("truncated") else 0
+            model_totals["errors"] += 1 if record.get("error") else 0
 
-    print("--- Usage summary (pilot/out/raw.jsonl) ---")
-    for model, model_totals in totals.items():
+    print(f"--- Usage summary ({_raw_path}) ---")
+    for model, t in totals.items():
         print(
-            f"{model}: {model_totals['calls']} calls, "
-            f"{model_totals['input_tokens']} input tokens, "
-            f"{model_totals['output_tokens']} output tokens, "
-            f"{model_totals['thought_tokens']} thought tokens"
+            f"{model}: {t['calls']} calls, {t['input_tokens']} input "
+            f"({t['cached_input_tokens']} cached), {t['output_tokens']} output, "
+            f"{t['thought_tokens']} thought, {t['truncated']} truncated, "
+            f"{t['errors']} errors"
         )

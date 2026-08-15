@@ -14,7 +14,12 @@ import pytest
 from scipy.stats import spearmanr
 
 from pilot import config
-from pilot.rescale import compute_C, reset_tolerance_counts, tolerance_counts
+from pilot.rescale import (
+    DEFAULT_TOLERANCE,
+    compute_C,
+    reset_tolerance_counts,
+    tolerance_counts,
+)
 
 RULE_REF = (
     "See CLAUDE.md, 'THE ONE RULE THAT PROTECTS THE PROJECT', and DESIGN.md §2. "
@@ -64,8 +69,8 @@ def test_ordered_ladder(y: float, expected: float, tie_rule: str):
 
 def test_tolerance_decides_the_equality_categories():
     """Just inside the tolerance is category 2; just outside it is category 3."""
-    inside = 2.0 + config.TOLERANCE / 2
-    outside = 2.0 + config.TOLERANCE * 2
+    inside = 2.0 + DEFAULT_TOLERANCE / 2
+    outside = 2.0 + DEFAULT_TOLERANCE * 2
     assert compute_C(inside, 2.0, 4.0, "lower") == 2.0
     assert compute_C(outside, 2.0, 4.0, "lower") == 3.0
 
