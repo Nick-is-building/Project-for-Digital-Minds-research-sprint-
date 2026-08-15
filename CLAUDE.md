@@ -231,3 +231,28 @@ described as a finding.
 
 Do not build the main experiment, expand the model list, add analysis beyond
 DESIGN.md §9, or write anything paper-facing until the pilot has returned a GO.
+
+---
+
+## What the pilots established (as of 2026-08-14)
+
+- **5-point scale (locked, DESIGN.md §3):** `y` and `z_hi` saturate at 5.0 for
+  both models; `C` is constant. Not fixed by harder tasks (LBPP changed
+  nothing) or reworded questions.
+- **0-100 scale, same tasks/models, authorised diagnostic deviation:** Claude
+  is **not** saturated — `y` ranges 89.8-95.0, 4-6 distinct values, SD
+  1.0-1.35, zero draws at 100. Gemini **is** saturated — `y` = 100.0 in 16/17
+  observations, `z_lo` constant at 0.0, `z_hi` constant at 100.0.
+- **Therefore:** saturation looks like a scale-format artifact for Claude and
+  intrinsic for Gemini. The signal exists in at least one model but coarse
+  scales destroy it.
+- **The vignette anchors are themselves a validity screen.** When both
+  anchors collapse to constants (Gemini, both scales), rescaling is provably
+  vacuous — see CLAUDE.md's "ONE RULE" section. No separate screening
+  protocol is needed; this falls out of the design already in place.
+- **P4 (self/other gap, byte-identical code):** Gemini 0.822 (fails
+  threshold 0.75), Claude -0.130 (passes).
+- **Parse failures:** 17 → 0 after the `ANSWER_INSTRUCTION` fix, and stayed
+  at 0 on the 0-100 scale with `MAX_OUTPUT_TOKENS_RATING` = 16.
+- **Code extraction failed on 3 Gemini LBPP tasks.** Must be fixed before the
+  main run.

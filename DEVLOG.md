@@ -886,6 +886,79 @@ stop — not the researcher's job to interpret them in this session.
 
 ---
 
+# Related work that now anchors this project
+
+- **Cacioli, arXiv:2604.22215.** Seven 3-9B open-weight models, TriviaQA,
+  numeric 0-100 and categorical 10-class elicitation: all seven Invalid, mean
+  ceiling rate 91.7 %. Categorical did not rescue validity. Concludes internal
+  representations are not necessarily absent — minimal verbal elicitation
+  fails to preserve them at the output interface "in this model-size regime."
+  Our frontier-scale result splits that regime: Claude's 0-100 signal
+  survived: Gemini's did not.
+- **Panickssery, Bowman & Feng, arXiv:2404.13076.** Self-preference: LLM
+  evaluators score their own outputs higher than others' where humans see
+  them as equal; self-recognition causally drives it. Our P4 is a cleaner
+  isolation — byte-identical code, authorship framing as the only
+  difference, execution ground truth instead of human annotators.
+- **Okada, Furukawa & Bunji, arXiv:2602.17262.** Likert formats show large
+  socially desirable responding; desirability-matched graded forced-choice
+  attenuates it; the trade-off is model-dependent. Establishes response
+  format as a first-class variable and model-dependence, both matching our
+  results.
+- **Zhang et al., arXiv:2606.05122.** Reframes judge-aligned self-evaluation
+  as a problem of elicitation rather than acquisition. That is precisely our
+  Claude result.
+
+Also record: the Pinocchio Inventory (Plisiecki et al., arXiv:2607.20082)
+uses a uniform 7-point response scale with decoding constrained to scale
+integers, aggregated over 24 items per scale. On our measured signal band a
+7-point scale would not resolve 92.0 from 92.6. Caveat to state honestly:
+aggregation over 24 items restores resolution at the scale level, so the
+concern is item-level, not necessarily scale-level.
+
+---
+
+## 2026-08-15 00:20 — Sonnet (claude-sonnet-5, Claude Code) — session close, no experiments
+
+**Built:** No new experiments this session, per explicit instruction. Three
+pieces of bookkeeping: (1) the repository is now connected to a GitHub
+remote — `git remote add origin` to
+`https://github.com/nick-is-building/Digital-Minds-research-sprint.git`,
+plus local `user.name`, `user.email`, `credential.helper=store` — verified
+with `git remote -v` and `git config --list --local`; **no push was made**,
+per explicit instruction, and no token was requested. (2) `CLAUDE.md` gained
+a "What the pilots established" section (22 lines) consolidating the
+5-point/0-100 saturation results, the P4 gap, the parse-failure fix, and the
+Gemini LBPP extraction failures — so no future session has to reconstruct
+this from the raw entries. (3) `DEVLOG.md` gained a "Related work that now
+anchors this project" section (four papers plus the Pinocchio Inventory
+resolution caveat), placed above Open Questions.
+
+**Decided:** Editing `CLAUDE.md` and `DESIGN.md` is normally off-limits for
+this assistant without flagging errors and logging them in Open Questions
+instead (established convention this session, not previously written down
+anywhere the assistant could cite) — overridden here only because the user,
+who owns both files, explicitly asked for this specific addition to
+`CLAUDE.md` in this message. `DESIGN.md` was not touched.
+
+**Did not work:** N/A — bookkeeping only, nothing run.
+
+**State:** `git status --short` clean after the commit below. `pytest
+pilot/tests/ -v` not re-run this session (no code changed under `pilot/`).
+Remote configured, not pushed. The two pilot runs' data and the 0-100 control
+run's data are unchanged from the previous entry.
+
+**Next:** The user will run the first `git push` themselves. Before the main
+experiment can start, still needed (not built this session): fix the Gemini
+LBPP code-extraction failures (3/10 tasks lost), fill in
+`PRICE_PER_MTOK_USD` for Gemini, add resumability for ~15,600 planned calls,
+add a regression test for `_orient`, decide how to frame saturation
+(format-artifact for Claude, intrinsic for Gemini) and the P4 asymmetry in
+the write-up, and decide whether/how the main experiment's response scale
+should differ from the locked 5-point default given this session's result.
+
+---
+
 # Open Questions
 
 Add anything unresolved. Remove anything answered. This section is the handover
