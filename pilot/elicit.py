@@ -27,7 +27,9 @@ environment or a .env file at the project root.
 """
 
 import json
+import random
 import re
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -45,9 +47,58 @@ _call_count = 0
 _call_budget = config.MAX_CALLS
 _raw_path = config.RAW_JSONL_PATH
 
+# Retry accounting, per model. `_retry_attempts` counts every retry we ISSUED
+# (an initial call is not a retry); `_retry_final_failures` counts the calls
+# whose retries were all exhausted. Both are read back by monitor_run.
+_retry_attempts: dict[str, int] = defaultdict(int)
+_retry_final_failures: dict[str, int] = defaultdict(int)
+
 
 class CallBudgetExceeded(RuntimeError):
     pass
+
+
+class SustainedRateLimit(RuntimeError):
+    """Raised when a 429 exhausts the retry loop.
+
+    Bubbles up past the observation loop the same way CallBudgetExceeded does,
+    so the run stops rather than walking through remaining tasks writing null
+    draws — the pattern that contaminated the gemini-3.1-pro-preview leg on
+    2026-08-16 before this guard existed.
+    """
+
+
+def _classify_error(exc: Exception) -> tuple[bool, bool]:
+    """Returns `(retryable, is_rate_limit)`.
+
+    Match is on the string form of the exception rather than exception class
+    because the two providers use different SDKs and the token that identifies
+    a 429 is stable across both — a class check would need a maintained list
+    per SDK and would silently miss a new subclass. If either the substring
+    `429` or `RATE_LIMIT`/`RESOURCE_EXHAUSTED` appears, this is a rate limit;
+    a 5xx substring is retryable but not a rate limit; anything else fails now.
+    """
+    s = repr(exc)
+    su = s.upper()
+    if "429" in s or "RATE_LIMIT" in su or "RESOURCE_EXHAUSTED" in su:
+        return True, True
+    for code in (" 500", " 502", " 503", " 504", "INTERNALSERVERERROR",
+                 "SERVICEUNAVAILABLE"):
+        if code in s or code in su:
+            return True, False
+    return False, False
+
+
+def retry_counts() -> dict[str, dict[str, int]]:
+    """Per-model retry stats for reporting. Read-only snapshot."""
+    models = set(_retry_attempts) | set(_retry_final_failures)
+    return {
+        m: {
+            "retry_attempts": _retry_attempts[m],
+            "retry_final_failures": _retry_final_failures[m],
+        }
+        for m in sorted(models)
+    }
 
 
 @dataclass
@@ -210,7 +261,7 @@ def _call_google(
 
     generation_config: dict = {"max_output_tokens": max_output_tokens}
     if is_rating:
-        generation_config["thinking_level"] = config.GOOGLE_RATING_THINKING_LEVEL
+        generation_config["thinking_level"] = config.rating_thinking_level(model)
 
     response = client.interactions.create(
         model=model,
@@ -224,8 +275,19 @@ def _call_google(
 
     # No finish_reason exists on the Interactions response, and the ceiling is a
     # combined thinking+output budget, so this is the only signal available.
+    #
+    # The slack is a codegen heuristic and must not be applied to a rating cap.
+    # Rating caps are 8, 16 and 256; against a slack of 16 the first two give
+    # thresholds of -8 and 0, so `spent >= threshold` was unconditionally true
+    # and every Gemini rating call was flagged truncated while spending 1 token
+    # of 8. That made the flag useless exactly where it was needed: it is the
+    # signal that catches a '100' cut down to '10'. A rating reply is short and
+    # its ceiling is exact, so the test is exact too.
     spent = (output_tokens or 0) + (thought_tokens or 0)
-    truncated = spent >= max_output_tokens - config.GOOGLE_TRUNCATION_SLACK_TOKENS
+    if is_rating:
+        truncated = spent >= max_output_tokens
+    else:
+        truncated = spent >= max_output_tokens - config.GOOGLE_TRUNCATION_SLACK_TOKENS
 
     return CallResult(
         text=response.output_text,
@@ -267,8 +329,34 @@ def _append_raw_line(record: dict) -> None:
 
 
 def parse_rating(text: str | None) -> int | None:
-    """Strict parse of a rating reply: a bare integer, or None."""
+    """Strict parse of a rating reply: a bare integer, or None.
+
+    Text only. Prefer `parse_rating_result`, which also refuses a reply that the
+    provider cut off — this function cannot see that and will happily return 10
+    for a truncated 100.
+    """
     return _parse_integer(text)
+
+
+def parse_rating_result(result: CallResult) -> int | None:
+    """Strict parse of a rating *call*: None if it failed or was truncated.
+
+    A truncated rating is discarded rather than parsed, and this is the whole
+    point of the function. On the 0-100 scale a reply of '100' cut off at the
+    output ceiling arrives as '10' or '1', which is a perfectly well-formed
+    integer inside the scale's range: it is not a parse failure and not an
+    off-scale value, so nothing downstream can tell it from a real answer. A
+    rating of 100 silently recorded as 10 is fabricated data.
+
+    This mirrors how the project already treats a truncated code-generation
+    reply (pilot.extract rejects it rather than repairing it). Discarded draws
+    are counted separately from ordinary parse failures so the two rates can be
+    reported apart — a truncation rate is a fact about our token ceiling, a
+    parse-failure rate is a fact about the model's compliance.
+    """
+    if result.truncated:
+        return None
+    return _parse_integer(result.text)
 
 
 def elicit_call(
@@ -279,11 +367,23 @@ def elicit_call(
     sample_index: int = 0,
     cache_prefix: bool = False,
 ) -> CallResult:
-    """One call. Always returns a CallResult; `text is None` means it failed.
+    """One call, retried on 429 and 5xx. Always returns a CallResult, except:
 
-    Logs to the raw log exactly once, before any parsing, whether the call
-    succeeded or raised. Raises CallBudgetExceeded if the ceiling would be
-    exceeded — that is the one exception that propagates.
+    - CallBudgetExceeded: the process-wide call ceiling would be crossed.
+    - SustainedRateLimit: a 429 has exhausted the retry loop, so the caller
+      must abort rather than record a null draw. Added 2026-08-16 after the
+      gemini-3.1-pro-preview leg walked through every remaining task writing
+      no_reply codegen failures once the daily quota tripped.
+
+    A 5xx that exhausts retries returns a null CallResult and logs the last
+    error, matching the pre-retry behaviour. Rate limits are treated more
+    strictly because a sustained 429 is almost always a per-day quota, not a
+    transient — the retry loop cannot outwait it.
+
+    The raw-log line carries `retries` (the count of retry ATTEMPTS made for
+    this call) and `retry_final_error` (the last error's string form, or None
+    if the eventual attempt succeeded), so retry rates are auditable and can
+    be reported apart from ordinary failures.
     """
     _check_call_budget()
 
@@ -296,13 +396,44 @@ def elicit_call(
         "cache_prefix": cache_prefix,
         "messages": messages,
     }
-    try:
-        result = _raw_call(model, messages, max_output_tokens, is_rating, cache_prefix)
-        record["error"] = None
-    except Exception as exc:
-        result = CallResult(text=None, input_tokens=None, output_tokens=None)
-        record["error"] = repr(exc)
 
+    max_retries = config.MAX_RETRIES
+    result: CallResult
+    last_error_repr: str | None = None
+    is_rate_limit_final = False
+    attempt = 0
+    retries = 0
+    while True:
+        try:
+            result = _raw_call(
+                model, messages, max_output_tokens, is_rating, cache_prefix
+            )
+            last_error_repr = None
+            break
+        except Exception as exc:  # noqa: BLE001 — we classify and re-decide.
+            retryable, is_rate_limit = _classify_error(exc)
+            last_error_repr = repr(exc)
+            is_rate_limit_final = is_rate_limit
+            if not retryable or attempt >= max_retries:
+                result = CallResult(text=None, input_tokens=None, output_tokens=None)
+                if attempt > 0:
+                    _retry_final_failures[model] += 1
+                break
+            # Exponential backoff with full-random jitter: base * (2**attempt)
+            # capped and multiplied by a fresh [0, 1) draw. That prevents a
+            # thundering herd if we ever fan calls out, and here just prevents
+            # every retry from landing on the same per-minute rollover.
+            attempt += 1
+            retries += 1
+            _retry_attempts[model] += 1
+            delay = min(
+                config.RETRY_BASE_SECONDS * (2 ** (attempt - 1)),
+                config.RETRY_MAX_SECONDS,
+            ) * random.random()
+            time.sleep(delay)
+
+    record["error"] = last_error_repr
+    record["retries"] = retries
     record["raw_response"] = result.text
     record["input_tokens"] = result.input_tokens
     record["output_tokens"] = result.output_tokens
@@ -313,6 +444,16 @@ def elicit_call(
     record["truncated"] = result.truncated
 
     _append_raw_line(record)
+
+    if result.text is None and is_rate_limit_final:
+        # This is what the leg-abort guard is for: the pro-preview run at 250
+        # requests/day/model wrote 50 no_reply codegen rows before the loop
+        # exited on its own; here it exits at the first sustained 429.
+        raise SustainedRateLimit(
+            f"429 on {model!r} exhausted {retries} retries; aborting the leg "
+            f"rather than accumulating null draws. Last error: {last_error_repr}"
+        )
+
     return result
 
 
@@ -341,26 +482,31 @@ def elicit(
     max_output_tokens: int,
     is_rating: bool = True,
     cache_prefix: bool = False,
-) -> list[int | None]:
-    """Returns one parsed integer (or None on failure) per sample.
+) -> tuple[list[int | None], int]:
+    """Returns `(one parsed integer or None per sample, truncated draw count)`.
 
     Every sample replays the identical prefix, so `cache_prefix=True` is
     correct here whenever the provider can cache at this prompt length: one
     write followed by `n_samples - 1` reads.
+
+    The truncation count is returned rather than folded into the Nones because a
+    draw dropped for truncation and a draw dropped for an unparseable reply are
+    different findings and are reported separately (see `parse_rating_result`).
     """
-    return [
-        _parse_integer(
-            elicit_text(
-                model,
-                messages,
-                max_output_tokens,
-                is_rating,
-                sample_index,
-                cache_prefix,
-            )
+    values: list[int | None] = []
+    truncated = 0
+    for sample_index in range(n_samples):
+        result = elicit_call(
+            model,
+            messages,
+            max_output_tokens,
+            is_rating,
+            sample_index,
+            cache_prefix,
         )
-        for sample_index in range(n_samples)
-    ]
+        values.append(parse_rating_result(result))
+        truncated += 1 if result.truncated else 0
+    return values, truncated
 
 
 def print_usage_summary() -> None:
@@ -374,7 +520,11 @@ def print_usage_summary() -> None:
             "cached_input_tokens": 0,
             "cache_creation_tokens": 0,
             "truncated": 0,
+            "truncated_ratings": 0,
+            "rating_calls": 0,
             "errors": 0,
+            "retries": 0,
+            "retry_final_failures": 0,
         }
     )
 
@@ -397,6 +547,12 @@ def print_usage_summary() -> None:
                 model_totals[field] += record.get(field) or 0
             model_totals["truncated"] += 1 if record.get("truncated") else 0
             model_totals["errors"] += 1 if record.get("error") else 0
+            model_totals["retries"] += record.get("retries") or 0
+            if (record.get("retries") or 0) > 0 and record.get("error"):
+                model_totals["retry_final_failures"] += 1
+            if record.get("is_rating"):
+                model_totals["rating_calls"] += 1
+                model_totals["truncated_ratings"] += 1 if record.get("truncated") else 0
 
     print(f"--- Usage summary ({_raw_path}) ---")
     for model, t in totals.items():
@@ -404,6 +560,30 @@ def print_usage_summary() -> None:
             f"{model}: {t['calls']} calls, {t['input_tokens']} input, "
             f"{t['output_tokens']} output, {t['thought_tokens']} thought, "
             f"{t['truncated']} truncated, {t['errors']} errors"
+        )
+    print()
+    print("--- Retry activity (429 / 5xx with exponential backoff) ---")
+    print(
+        "Every 429 before this guard existed became a permanent null draw; the "
+        "retry loop caps at "
+        f"{config.MAX_RETRIES} attempts and a leg aborts on the first sustained "
+        "429 (see elicit.SustainedRateLimit)."
+    )
+    for model, t in totals.items():
+        if t["retries"] or t["retry_final_failures"]:
+            print(
+                f"{model}: {t['retries']} retry attempts, "
+                f"{t['retry_final_failures']} calls whose retries were exhausted"
+            )
+    if not any(t["retries"] for t in totals.values()):
+        print("No retries needed on any model in this raw log.")
+    print()
+    print("--- Truncated rating calls (draws discarded, not parsed) ---")
+    for model, t in totals.items():
+        rate = t["truncated_ratings"] / t["rating_calls"] if t["rating_calls"] else 0.0
+        print(
+            f"{model}: {t['truncated_ratings']} of {t['rating_calls']} "
+            f"rating calls ({rate:.1%})"
         )
     print()
     print("--- Cache tokens actually reported by the provider ---")

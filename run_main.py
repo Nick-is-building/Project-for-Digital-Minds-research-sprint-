@@ -117,6 +117,7 @@ def observation_for(
     direction: str,
     low_first: bool,
     draws: dict[str, list[int | None]],
+    truncations: dict[str, int],
 ) -> analyze.Observation:
     return analyze.Observation(
         model=record.model,
@@ -134,6 +135,7 @@ def observation_for(
         passes_visible=record.passes_visible,
         executes_cleanly=record.executes_cleanly,
         code_extracted=True,
+        truncated_draws=truncations,
     )
 
 
@@ -235,11 +237,11 @@ def run(
                         model, task, fmt, direction, low_first, record.failure_reason
                     )
                 else:
-                    draws = pilot.run_ratings(
+                    draws, truncations = pilot.run_ratings(
                         model, task, record.solution, direction, low_first, fmt
                     )
                     obs = observation_for(
-                        record, task, fmt, direction, low_first, draws
+                        record, task, fmt, direction, low_first, draws, truncations
                     )
                 observations.append(obs)
                 pilot.append_observation(obs, observations_path)
@@ -710,6 +712,11 @@ def main() -> int:
         observations = run(task_list)
     except elicit.CallBudgetExceeded as exc:
         print(f"\nAborted: {exc}", file=sys.stderr)
+    except elicit.SustainedRateLimit as exc:
+        # Log the exact message so the DEVLOG can quote it without going back
+        # to the raw log. Return code 2 distinguishes this from budget exhaustion
+        # for anything watching the exit status (e.g. a shell wrapper).
+        print(f"\nLeg aborted on sustained 429: {exc}", file=sys.stderr)
     except KeyboardInterrupt:
         print("\nInterrupted. Re-run to resume from the files written so far.", file=sys.stderr)
 

@@ -83,6 +83,12 @@ class Observation:
     # Why extraction failed, when it did (pilot.extract). Distinguishes "our
     # output ceiling cut the reply off" from "the model emitted junk".
     codegen_failure_reason: str | None = None
+    # How many draws of each rating field were discarded because the reply hit
+    # the output ceiling. Those draws are None in the lists above, so they are
+    # already excluded from every metric; this field only lets the diagnostics
+    # report the truncation rate apart from ordinary parse failures. Keyed by
+    # RATING_FIELDS prefix ("y_v", "z_lo", "z_hi", "y_n", "other").
+    truncated_draws: dict[str, int] = field(default_factory=dict)
 
     @property
     def scale(self) -> config.ScaleFormat:
@@ -513,7 +519,7 @@ def _diagnostics(grouped: dict[str, list[Observation]]) -> dict[str, dict[str, o
     out: dict[str, dict[str, object]] = {}
 
     for model, obs_list in grouped.items():
-        total_draws = parse_failures = off_scale = 0
+        total_draws = null_draws = truncated = off_scale = 0
         per_question: dict[str, int] = {}
         reasons: dict[str, int] = {}
         for obs in obs_list:
@@ -523,7 +529,8 @@ def _diagnostics(grouped: dict[str, list[Observation]]) -> dict[str, dict[str, o
                 failures = sum(1 for d in draws if d is None)
                 off = sum(1 for d in draws if d is not None and not scale.in_range(d))
                 total_draws += len(draws)
-                parse_failures += failures
+                null_draws += failures
+                truncated += obs.truncated_draws.get(name.removesuffix("_draws"), 0)
                 off_scale += off
                 per_question[name] = per_question.get(name, 0) + failures + off
             if obs.codegen_failure_reason:
@@ -536,7 +543,13 @@ def _diagnostics(grouped: dict[str, list[Observation]]) -> dict[str, dict[str, o
         metrics: dict[str, object] = {
             "observations": n,
             "rating draws": total_draws,
-            "parse_failure_rate": _rate(parse_failures, total_draws),
+            # Truncated draws are discarded unparsed (elicit.parse_rating_result),
+            # so they are null here too. Reported apart from parse failures
+            # because the two say different things: a parse failure is a reply we
+            # could not read, a truncation is a reply our own ceiling cut off.
+            "parse_failure_rate": _rate(null_draws - truncated, total_draws),
+            "truncation_failure_rate": _rate(truncated, total_draws),
+            "unusable_draw_rate": _rate(null_draws, total_draws),
             "off_scale_rate": _rate(off_scale, total_draws),
             "code_extraction_failure_rate": _rate(
                 sum(1 for o in obs_list if not o.code_extracted), n
@@ -750,7 +763,9 @@ def _format_section(
         f"{'fully labelled' if scale.fully_labelled else 'endpoints labelled only'}: "
         f"{dict(scale.labels)}. "
         f"Answer instruction: {scale.answer_instruction!r}. "
-        f"Rating token cap: {scale.max_output_tokens_rating}.",
+        f"Rating token cap: {scale.max_output_tokens_rating} "
+        f"(overridden per model where a model cannot be stopped from reasoning: "
+        f"{config.RATING_MAX_OUTPUT_TOKENS_BY_MODEL}).",
         "",
         f"Width-relative thresholds (DESIGN.md §9): P1 SD >= {scale.p1_min_sd:g}, "
         f"P3 >= {scale.p3_min_difference:g}, P4 <= {scale.p4_max_abs_gap:g}, "

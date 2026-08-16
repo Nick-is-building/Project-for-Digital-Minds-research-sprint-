@@ -1239,7 +1239,171 @@ model property anywhere in the paper.
 
 ---
 
-# Open Questions
+## 2026-08-16 06:00 — Opus (claude-opus-4-7, Claude Code)
+
+**Built:** three pre-run checks (`check_untested_paths.py`) drove `run_pilot`'s
+own message builders through paths the smoke test did not reach: CHECK 1 sent
+one Gemini condition-V thread (four turns on one context), CHECK 2 sent one
+rating call to each of `claude-sonnet-5`, `gemini-3.6-flash`, and
+`gemini-3.1-pro-preview` on all three scale formats, and CHECK 3 re-verified
+`gemini-3.1-pro-preview` after the fixes. Retry/backoff was added to
+`elicit_call`: up to 5 attempts, exponential with jitter, on 429 and 5xx. A
+429 that exhausts the retries raises `elicit.SustainedRateLimit`, caught in
+`run_main.main` alongside `CallBudgetExceeded`, which stops the leg rather
+than walking through remaining tasks writing null draws (see "Did not work").
+Truncated rating draws are discarded as parse failures and counted separately
+as `truncation_failure_rate` in `Observation.truncated_draws` (added), so a
+truncated `'100'` cannot be silently recorded as `10`. A `monitor_run.py`
+watchdog script and a `watchdog.sh` systemd-user unit enforce the five stop
+conditions every two minutes; the mainrun and watchdog both ran as lingering
+systemd user units in `app.slice`, verified outside the SSH session scope. A
+`probe_gemini_2_5_pro.py` script drove the 32-call replacement probe.
+
+**Decided:** `gemini-3.1-pro-preview` is out of the sprint. Its 429 body names
+the quota exactly: `generativelanguage.googleapis.com/generate_requests_per_model_per_day`,
+`limit: 250`, retry-after ~21h43m from 02:16 UTC (reset at UTC midnight). We
+needed ~4,560 requests for the leg. Every 429 body was identical across all
+68 errors and named a per-day request count, not tokens, not per-minute, not
+spend; `x-ratelimit-*` and `retryDelay` were absent, but the message itself
+carries the quotaMetric. This is a preview-model quota — `gemini-3.6-flash`
+made 4,050+ successful draws on the same API key and project in the same
+window without a single error — and is a **reproducibility constraint** for
+anyone building a code-generation study on Gemini preview models. Recorded
+so the next user does not have to re-derive it.
+
+`gemini-3.5-flash-lite` was substituted: non-preview, Flash-Lite tier
+(different from Flash), 32/32 probe clean with zero thought tokens under
+`thinking_level="minimal"`, and the full leg ran with **0 errors, 0 retries,
+0 429s** across 4,050 rating calls and 60 codegen calls. This is a **tier
+downshift from the design's intended Pro/Flash contrast**: `gemini-2.5-pro`
+returned 404 "no longer available to new users" and no other non-preview Pro
+model is exposed to this key. Flash-Lite still provides a within-provider
+architecture contrast against `gemini-3.6-flash` for the write-up, but it is
+weaker than a Pro/Flash pair would have been.
+
+Nine `gemini-3.1-pro-preview` observations that had been written to disk were
+**dropped before the replacement leg**: those observations contained 11 null
+rating draws where every 429 had bumped the parser to `None`, so they were
+indistinguishable from parse failures. Every persisted draw must come from a
+successful call; the raw file was backed up as
+`main_observations.jsonl.pre_gemini_prune.bak` and the 9 rows filtered out.
+Only 1 of the 9 actually had null draws — the other 8 were clean — but resume
+cannot distinguish "complete cell" from "complete cell that intersected a
+burst", so all 9 went.
+
+Retry/backoff is a **leg-specific deviation applied only to `gemini-3.5-flash-lite`**.
+The four earlier legs (claude-haiku-4-5, claude-sonnet-5, claude-opus-5,
+gemini-3.6-flash) completed before the retry loop existed. Retry changes
+whether a call succeeds, not what the model answers, so between-model
+comparability is unaffected — but this is stated. (In practice
+`gemini-3.5-flash-lite` needed zero retries, so the guard was never exercised
+mid-leg; it stopped being about comparability and started being about safety.)
+
+Three earlier bug fixes, from the CHECKs that preceded the main run and were
+already in the code before the aborted first attempt: `thinking_level="low"`
+for `gemini-3.1-pro-preview` rating calls (it rejects `"minimal"` with a 400
+"not a supported thinking level"), rating cap 256 for that same model (at
+lower caps its own reasoning ate the budget and left a truncated integer
+that parsed as a valid but wrong answer — `'100'` truncated to `'10'`),
+and rating truncation is now tested as `spent >= max_output_tokens` with no
+slack (the old test `spent >= cap - GOOGLE_TRUNCATION_SLACK_TOKENS` with
+rating caps of 8/16 was always-true, so the truncation flag was permanently
+raised on every Gemini rating call). All three are in `pilot/config.py` and
+`pilot/elicit.py` and would have contaminated the whole run if unaddressed.
+
+**Did not work:** the first main run hit `gemini-3.1-pro-preview` at task 10 of
+that model's leg and 429'd once, then again, then 68 times inside 4.2 minutes.
+Each 429 was correctly recorded as `no_reply` for codegen but as a null draw
+for ratings, and `run_main`'s task loop walked through every remaining task in
+the pro-preview leg writing `no_reply` codegen logs before exiting cleanly.
+That pattern is exactly what the new `SustainedRateLimit` guard is for — it
+raises on the first exhausted-retry 429 rather than filling the log with 50
+empty rows and 11 permanent null rating draws.
+
+`gemini-2.5-pro` as the pro-preview replacement: 404 "no longer available to
+new users". Cannot be used on this key.
+
+The first watchdog on the original run targeted the wrong PID: `$!` after a
+`nohup ... &` inside a wrapper shell returns the WRAPPER's pid, not python's.
+A `pgrep -f` substitute matched more than one process because the sandbox
+subprocesses fork with the same cmdline. Fixed by reading systemd's `MainPID`
+via `systemctl show`, which is unambiguous.
+
+The first restarted run tripped the watchdog on the stall condition at
+second 2 of its life: `monitor_run.py`'s `last call` was computed from
+`main_raw.jsonl`'s mtime, which was inherited from the previous session's
+last write 38 minutes earlier. `_mainrun_start_epoch()` was added to floor
+the reference time at systemd's `ActiveEnterTimestamp`.
+
+tmux was installed as a persistence fallback but its server landed in
+`session-1.scope` (the SSH session's own cgroup), no stronger than the
+`nohup` it replaced. Switched to `systemd-run --user --unit=<name>` with
+`loginctl enable-linger Kathi`, and verified persistence empirically: a
+probe unit survived its spawning shell being killed.
+
+**State:** the main experiment is **complete**. 5 models × 60 tasks × 3 scale
+formats = **900 observations**, all from successful calls.
+`pilot/out/main_report.md` was written by the run's finally block. Both
+systemd units are `inactive` (clean exit).
+
+Per-model counts (final):
+
+| model | obs | draws | parse | trunc | 429 | retries | exec fail | code-extract fail | spend |
+|---|---|---|---|---|---|---|---|---|---|
+| claude-haiku-4-5-20251001 | 180 | 4,425 | 0.00% | 0.00% | 0 | 0 | 15.0% | 3 | $3.4711 |
+| claude-sonnet-5 | 180 | 4,425 | 0.02% | 0.84% | 0 | 0 | 1.7% | 3 | $6.6974 |
+| claude-opus-5 | 180 | 4,425 | 0.00% | 0.02% | 0 | 0 | 1.7% | 3 | $14.4603 |
+| gemini-3.6-flash | 180 | 4,050 | 0.00% | 0.00% | 0 | 0 | 10.0% | **18** | $2.0222 |
+| gemini-3.5-flash-lite | 180 | 4,500 | 0.00% | 0.00% | 0 | 0 | 0.0% | 0 | $0.2739 |
+| gemini-3.1-pro-preview (abandoned) | — | — | — | — | 68 | — | — | — | $0.8067 |
+| **total** | **900** | **21,825** | | | | | | | **$27.7315** |
+
+Two **write-up obligations** the analysis must respect:
+
+1. **Codegen ceiling artefact on `gemini-3.6-flash`.** Six (model, task) pairs
+   have `code_extracted=False`, three formats each = **18 observations** with
+   no ground truth. Cause: `max_output_tokens=4096` for codegen is a *combined*
+   thinking+output budget on the Gemini Interactions API, and Flash spent
+   ~3,930 of the 4,096 tokens on thinking, leaving ~160 for the code, cutting
+   off mid-function. Affected task IDs, hard-coded here because the analysis
+   needs to exclude or separately report them from any Gemini-accuracy figure:
+   **mbpp/31, lbpp/python/001, lbpp/python/002, lbpp/python/016, lbpp/python/018,
+   lbpp/python/019** (5 of 6 are LBPP). This affects CODEGEN ONLY. All Gemini
+   rating draws are clean (0% parse, 0% truncation). The primary result — the
+   scale-format effect on self-reports — is **untouched**. Only Gemini's
+   `passes_hidden` rate is understated, and that enters the secondary analysis.
+   Report as a **reportable methodological finding, not just a caveat**: on
+   models where `max_output_tokens` is a combined thinking+output budget, an
+   apparently generous ceiling can silently truncate generated code while
+   leaving no error signal — the code simply is not there. Two lines in the
+   limitations for anyone building a code-generation study on Gemini.
+
+2. **P3 confound is DISSOLVED.** The pro-preview model was going to be a
+   named limitation on P3 (between-model scale-use comparison) because it
+   reasons before every rating and cannot be told not to. With that model
+   out, `gemini-3.5-flash-lite` produced **0 thought tokens across 4,500
+   rating calls** under `thinking_level="minimal"` (matching `gemini-3.6-flash`),
+   so P3 is now clean: all four rated-with-thinking-off models rated
+   symmetrically. The `RATING_MAX_OUTPUT_TOKENS_BY_MODEL` and
+   `GOOGLE_RATING_THINKING_LEVEL_BY_MODEL` overrides in `config.py` remain
+   for the pro-preview entry — kept as documentation of what would have been
+   needed, and harmless because pro-preview is no longer in `MAIN_MODELS`.
+
+Two design points to raise separately in the write-up, not artefacts:
+
+- The intended Pro/Flash cross-provider contrast is a **Flash-Lite/Flash**
+  contrast because no non-preview Pro model was accessible. Weaker than
+  intended.
+- Retry/backoff on `gemini-3.5-flash-lite` only. See "Decided".
+
+**Next:** run the analysis: `python3 -u run_main.py` will not (it will see
+every cell as done and exit at the summary). The analysis pipeline is invoked
+by loading the observations and calling `analyze.write_report`; the run
+itself already wrote `pilot/out/main_report.md`. The next session reads that
+report, resolves the two write-up obligations above in the paper text, and
+composes the submission.
+
+
 
 Add anything unresolved. Remove anything answered. This section is the handover
 between sessions.
@@ -1406,15 +1570,13 @@ between sessions.
   visible assert to V's step 1 but not N's, whereas the implementation sends the
   identical prompt in both, so the conditions differ only in the vignettes. Both
   are wording fixes for the user to make in §4; the code is not changing.
-- **The full multi-turn DESIGN.md §4 flow is now tested on Anthropic and still
-  untested on Google.** The smoke test ran complete condition-V threads
-  (vignettes then self-question, one context) on Opus 5 and Haiku, 150 rating
-  calls, 0 parse failures. **`elicit.py`'s Gemini path has still never been sent
-  more than one message.** It builds the thread from explicit
-  `user_input`/`model_output` steps — stateless replay rather than
-  `previous_interaction_id` chaining, to match "fresh context every time" — and
-  if that step encoding is wrong, it will be wrong on every Gemini cell.
-  **Check the first Gemini condition-V thread of the main run by hand.**
+- ~~**The full multi-turn DESIGN.md §4 flow is now tested on Anthropic and still
+  untested on Google.**~~ **Closed 2026-08-16 by CHECK 1** (four turns on one
+  Gemini condition-V context, all four calls succeeded, parsed integers in
+  range). The stateless replay through `user_input`/`model_output` steps is
+  correct on the Interactions API. Confirmed again at scale by the main run:
+  4,050 gemini-3.6-flash rating draws and 4,500 gemini-3.5-flash-lite draws,
+  0 parse failures on both.
 - ~~**Everything added on 2026-08-15 is untested against a live API.**~~ **Closed
   2026-08-15 by the smoke test: 414 calls, $0.6450.** `p7` and `s100` both ran
   live through the current runner (0 parse failures in 150 rating calls); the
@@ -1423,13 +1585,12 @@ between sessions.
   models answered; resume recovered a `kill -9`. **This note paid for itself
   several times over** — it caught a non-deterministic crash that would have
   contaminated 4,560 Opus 5 calls, and a task-loader bug. Keep the habit.
-- **`claude-sonnet-5` and the two Gemini models have made one codegen call each
-  and have never run a rating block.** The residue of the smoke test's scope. The
-  specific risk is that Sonnet 5 shares Opus 5's generation and may share its
-  thinking-block-on-rating behaviour; the `_first_text` + `thinking: disabled`
-  fix covers it by construction, but it has not been *observed* on that model.
-  Watch the first Sonnet 5 and Gemini cells of the main run for errors and parse
-  failures before letting it run unattended.
+- ~~**`claude-sonnet-5` and the two Gemini models have made one codegen call
+  each and have never run a rating block.**~~ **Closed 2026-08-16 by CHECK 2**
+  and confirmed at scale: sonnet-5 finished 4,425 rating draws at 0.02% parse
+  failure, gemini-3.6-flash 4,050 at 0.00%, and gemini-3.5-flash-lite (the
+  replacement for gemini-3.1-pro-preview) 4,500 at 0.00%. `_first_text` +
+  `thinking: disabled` held on sonnet-5 as designed.
 - **The cost estimate's Gemini figures are a lower bound and should be checked
   against the first real spend.** `EST_CODEGEN_OUTPUT_TOKENS[google] = 854` was
   measured while the ceiling was 1020 combined tokens with 20 of 40 calls
@@ -1445,6 +1606,36 @@ between sessions.
   (60 tasks), Haiku $2.93 vs $2.85. Re-measuring the ratio on Opus 5's own logs
   would close this; it is not worth doing before the run, because the direction
   and rough size are known and the total (~$31) is well inside budget.
+- **REPRODUCIBILITY: `gemini-3.1-pro-preview` has a per-model-per-day request
+  quota of 250 (verified 2026-08-16, error metric
+  `generativelanguage.googleapis.com/generate_requests_per_model_per_day`).**
+  This is a preview-model quota, not an account-tier issue — `gemini-3.6-flash`
+  made 4,050+ successful draws on the same key and project in the same window.
+  A code-generation study of this shape needs ~4,560 requests per model per
+  leg, so no non-tiered account can complete a pro-preview leg in a day. If
+  someone re-runs this design with pro-preview on a paid tier, verify the
+  daily limit before committing to the run.
+- **WRITE-UP OBLIGATION: exclude or separately report the six
+  code-extraction failures on `gemini-3.6-flash`** — mbpp/31, lbpp/python/001,
+  lbpp/python/002, lbpp/python/016, lbpp/python/018, lbpp/python/019
+  (18 observations, three formats × six tasks). Cause was the combined
+  thinking+output budget on the Interactions API eating 3,930 of the 4,096
+  codegen tokens on reasoning; the code was cut off mid-function. Affects
+  Gemini's `passes_hidden` figures (secondary analysis) only. Rating draws
+  are unaffected. Also record as a **methodological finding for the field**:
+  on providers where `max_output_tokens` is combined, a generous ceiling can
+  silently truncate output with no error signal — a category of failure
+  that a code-generation study cannot detect without an explicit truncation
+  check.
+- **WRITE-UP: retry/backoff is on `gemini-3.5-flash-lite` only.** The other
+  four legs finished before it existed. Retry changes success/failure of a
+  call, not what a model answers, so between-model comparability is
+  unaffected — but state the asymmetry. In practice the flash-lite leg
+  needed zero retries.
+- **WRITE-UP: Pro/Flash cross-provider contrast is Flash-Lite/Flash.**
+  `gemini-2.5-pro` was 404 to new keys; no other non-preview Pro is exposed.
+  `gemini-3.5-flash-lite` is a tier down from Flash, not a tier up. Weaker
+  contrast than the design intended, still meaningful within-provider.
 - **WRITE-UP OBLIGATION: every Gemini pilot accuracy figure needs a stated
   caveat.** Gemini's pilot solutions were truncated at our token ceiling, so its
   measured accuracy is **understated** — some of what was scored as a wrong answer

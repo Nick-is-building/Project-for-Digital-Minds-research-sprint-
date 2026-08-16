@@ -119,14 +119,14 @@ def _walk_condition_v(
                 ),
             }
         )
-        reply = respond(f"vignette rating: {which}", list(messages), index == 0)
+        reply = respond(which, list(messages), index == 0)
         replies[which] = reply
         messages.append({"role": "assistant", "content": reply or ""})
 
     messages.append(
         {"role": "user", "content": _rating_message(fmt, config.QUESTION_SELF, direction)}
     )
-    replies["self"] = respond("self-assessment", list(messages), False)
+    replies["self"] = respond("self", list(messages), False)
     return replies
 
 
@@ -198,30 +198,43 @@ def run_condition_v(
     direction: str,
     low_first: bool,
     fmt: config.ScaleFormat,
-) -> dict[str, list[int | None]]:
-    """`N_SAMPLES` independent threads through the same condition-V context."""
+) -> tuple[dict[str, list[int | None]], dict[str, int]]:
+    """`N_SAMPLES` independent threads through the same condition-V context.
+
+    Returns the draws and, per question, how many of them were discarded for
+    truncation. `_walk_condition_v` hands `respond` the question label, so the
+    results are keyed by the same strings the draws are — deriving them from
+    call order instead would reintroduce the index arithmetic that produced the
+    original condition-V ordering bug.
+    """
     draws: dict[str, list[int | None]] = {"low": [], "high": [], "self": []}
+    truncations: dict[str, int] = {"low": 0, "high": 0, "self": 0}
+    cap = config.rating_max_output_tokens(model, fmt)
 
     for sample_index in range(config.N_SAMPLES):
-        replies = _walk_condition_v(
-            task,
-            solution,
-            direction,
-            low_first,
-            lambda _label, messages, first: elicit.elicit_text(
+        results: dict[str, elicit.CallResult] = {}
+
+        def respond(which, messages, first, _results=results, _i=sample_index):
+            result = elicit.elicit_call(
                 model,
                 messages,
-                fmt.max_output_tokens_rating,
+                cap,
                 is_rating=True,
-                sample_index=sample_index,
+                sample_index=_i,
                 cache_prefix=first,
-            ),
-            fmt,
-        )
-        for key in draws:
-            draws[key].append(elicit.parse_rating(replies[key]))
+            )
+            _results[which] = result
+            return result.text
 
-    return draws
+        _walk_condition_v(task, solution, direction, low_first, respond, fmt)
+
+        for key in draws:
+            result = results[key]
+            draws[key].append(elicit.parse_rating_result(result))
+            if result.truncated:
+                truncations[key] += 1
+
+    return draws, truncations
 
 
 def run_ratings(
@@ -231,34 +244,50 @@ def run_ratings(
     direction: str,
     low_first: bool,
     fmt: config.ScaleFormat,
-) -> dict[str, list[int | None]]:
+) -> tuple[dict[str, list[int | None]], dict[str, int]]:
     """Condition V, condition N and the P4 probe for one (solution, format).
 
-    Condition N and the P4 probe send an identical prompt N_SAMPLES times, so
-    both carry a cache breakpoint: one write, four reads.
+    Returns `(draws, truncations)`, both keyed by question. Condition N and the
+    P4 probe send an identical prompt N_SAMPLES times, so both carry a cache
+    breakpoint: one write, four reads.
     """
-    v_draws = run_condition_v(model, task, solution, direction, low_first, fmt)
-    return {
+    v_draws, v_truncations = run_condition_v(
+        model, task, solution, direction, low_first, fmt
+    )
+    cap = config.rating_max_output_tokens(model, fmt)
+
+    y_n, y_n_truncated = elicit.elicit(
+        model,
+        _condition_n_messages(task, solution, direction, fmt),
+        config.N_SAMPLES,
+        cap,
+        is_rating=True,
+        cache_prefix=True,
+    )
+    other, other_truncated = elicit.elicit(
+        model,
+        _p4_messages(task, solution, direction, fmt),
+        config.N_SAMPLES,
+        cap,
+        is_rating=True,
+        cache_prefix=True,
+    )
+
+    draws = {
         "y_v": v_draws["self"],
         "z_lo": v_draws["low"],
         "z_hi": v_draws["high"],
-        "y_n": elicit.elicit(
-            model,
-            _condition_n_messages(task, solution, direction, fmt),
-            config.N_SAMPLES,
-            fmt.max_output_tokens_rating,
-            is_rating=True,
-            cache_prefix=True,
-        ),
-        "other": elicit.elicit(
-            model,
-            _p4_messages(task, solution, direction, fmt),
-            config.N_SAMPLES,
-            fmt.max_output_tokens_rating,
-            is_rating=True,
-            cache_prefix=True,
-        ),
+        "y_n": y_n,
+        "other": other,
     }
+    truncations = {
+        "y_v": v_truncations["self"],
+        "z_lo": v_truncations["low"],
+        "z_hi": v_truncations["high"],
+        "y_n": y_n_truncated,
+        "other": other_truncated,
+    }
+    return draws, truncations
 
 
 def failed_observation(
@@ -287,6 +316,7 @@ def failed_observation(
         executes_cleanly=False,
         code_extracted=False,
         codegen_failure_reason=reason,
+        truncated_draws={},
     )
 
 
@@ -300,7 +330,7 @@ def _run_observation(
     if solution is None:
         return failed_observation(model, task, fmt, direction, low_first, reason)
 
-    draws = run_ratings(model, task, solution, direction, low_first, fmt)
+    draws, truncations = run_ratings(model, task, solution, direction, low_first, fmt)
 
     return analyze.Observation(
         model=model,
@@ -318,6 +348,7 @@ def _run_observation(
         passes_visible=sandbox.run_solution(solution, [task.visible_assert], task.setup_code),
         executes_cleanly=sandbox.run_solution(solution, [], task.setup_code),
         code_extracted=True,
+        truncated_draws=truncations,
     )
 
 
@@ -434,7 +465,7 @@ def dry_run_condition_v(
     print(f"scale_direction      : {direction}")
     print(f"low_vignette_first   : {low_first}")
     print(f"samples per question : {config.N_SAMPLES}")
-    print(f"rating token cap     : {fmt.max_output_tokens_rating}")
+    print(f"rating token cap     : {config.rating_max_output_tokens(model, fmt)}")
     print(
         f"thresholds           : P1 SD >= {fmt.p1_min_sd:g}, "
         f"P3 >= {fmt.p3_min_difference:g}, P4 <= {fmt.p4_max_abs_gap:g}, "

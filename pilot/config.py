@@ -79,12 +79,18 @@ PILOT_MODELS = (ANTHROPIC_MODEL, GOOGLE_MODEL)
 #     is the current flagship, and the only model in this set whose cache
 #     minimum (512 tokens) is low enough for this workload's ~1,150-token
 #     reused prefix to clear — see CACHE_MIN_PROMPT_TOKENS below.
+# gemini-3.1-pro-preview was here through 2026-08-16 02:00 UTC, when its per-
+# model-per-day quota of 250 requests tripped mid-leg (retry-after 21h43m), 24h
+# before submission deadline. Replaced by gemini-3.5-flash-lite: non-preview,
+# different tier (Flash-Lite), 32/32 clean on the probe, no thought tokens under
+# thinking_level="minimal". The pro-preview data on disk (9 obs) was pruned as
+# the 429 burst contaminated one of them; see main_observations.jsonl.pre_gemini_prune.bak.
 MAIN_MODELS = (
     "claude-haiku-4-5-20251001",
     "claude-sonnet-5",
     "claude-opus-5",
     "gemini-3.6-flash",
-    "gemini-3.1-pro-preview",
+    "gemini-3.5-flash-lite",
 )
 
 PROVIDER: dict[str, str] = {
@@ -96,6 +102,7 @@ PROVIDER: dict[str, str] = {
     "gemini-3.6-flash": GOOGLE,
     "gemini-3.7-flash": GOOGLE,
     "gemini-3.1-pro-preview": GOOGLE,
+    "gemini-3.5-flash-lite": GOOGLE,
 }
 
 # --- Elicitation (DESIGN.md §6) --------------------------------------------
@@ -126,6 +133,50 @@ GOOGLE_TRUNCATION_SLACK_TOKENS = 16
 # classification, not a task that benefits from extended thinking. Code
 # generation keeps the model's default thinking level.
 GOOGLE_RATING_THINKING_LEVEL = "minimal"
+
+# gemini-3.1-pro-preview rejects "minimal" outright:
+#   400 'minimal' is not a supported thinking level for this model.
+#       Allowed values are: high, low, medium.
+# Verified live 2026-08-15. This is not a typo we can correct away: that model
+# cannot be made to stop reasoning at all. `thinking_level="none"` is a 400,
+# `thinking_budget=0` is accepted and ignored, and omitting the argument
+# entirely still spends ~59 thought tokens. It always reasons before answering.
+#
+# Consequence for the design, recorded here because it is a model property and
+# not a configuration choice of ours: this one model reasons before every rating
+# while the other four have thinking explicitly disabled. That asymmetry is a
+# named limitation on the between-model scale-use comparison (P3). It does not
+# touch the within-model format effect, which is the primary result, because all
+# three formats of a given model are elicited under identical settings.
+GOOGLE_RATING_THINKING_LEVEL_BY_MODEL: dict[str, str] = {
+    "gemini-3.1-pro-preview": "low",
+}
+
+
+def rating_thinking_level(model: str) -> str:
+    return GOOGLE_RATING_THINKING_LEVEL_BY_MODEL.get(
+        model, GOOGLE_RATING_THINKING_LEVEL
+    )
+
+# Retry parameters for elicit_call. Added 2026-08-16 for the gemini-3.5-flash-lite
+# leg after gemini-3.1-pro-preview 429'd 68 times and every one became a
+# permanent null draw. Kept as constants rather than magic numbers so the DEVLOG
+# statement of "5 retries, exponential backoff with jitter" is auditable.
+#
+# Total worst-case wait across 5 retries with these values: base * (1+2+4+8+16)
+# = 31s, further multiplied by a [0,1) jitter draw per attempt so the effective
+# max is bounded by 31s and expected value is ~15s. A 429 that survives that has
+# to be per-day, not per-minute, and the caller aborts the leg on the next
+# elicit.SustainedRateLimit rather than accumulating null draws.
+#
+# This retry is a deviation on the gemini-3.5-flash-lite leg only: the four
+# earlier legs (claude-haiku-4-5, claude-sonnet-5, claude-opus-5, gemini-3.6-flash)
+# finished before this code existed. Retry changes whether a call succeeds, not
+# what the model answers, so between-model comparability is unaffected — but the
+# asymmetry is stated in the DEVLOG.
+MAX_RETRIES = 5
+RETRY_BASE_SECONDS = 1.0
+RETRY_MAX_SECONDS = 32.0
 
 # Hard ceiling on total API calls made in one process, across all providers.
 # Guards against a runaway loop silently burning budget. The main experiment
@@ -180,6 +231,8 @@ PRICE_PER_MTOK_USD: dict[str, dict[str, float | None]] = {
     "gemini-3.6-flash": {"input": 0.75, "output": 3.75},
     "gemini-3.7-flash": {"input": None, "output": None},
     "gemini-3.1-pro-preview": {"input": 2.00, "output": 12.00},
+    # gemini-3.5-flash-lite: Google published rates (see DEVLOG 2026-08-16).
+    "gemini-3.5-flash-lite": {"input": 0.10, "output": 0.40},
 }
 
 # Minimum prompt length (tokens) below which the provider will not cache, per
@@ -208,6 +261,7 @@ CACHE_MIN_PROMPT_TOKENS: dict[str, int] = {
     "gemini-3.6-flash": 4096,
     "gemini-3.7-flash": 4096,
     "gemini-3.1-pro-preview": 4096,
+    "gemini-3.5-flash-lite": 4096,
 }
 
 # What a cached token costs relative to a normal input token, per provider.
@@ -377,6 +431,36 @@ SCALE_S100 = ScaleFormat(
 SCALE_FORMATS: dict[str, ScaleFormat] = {
     fmt.name: fmt for fmt in (SCALE_P5, SCALE_P7, SCALE_S100)
 }
+
+# A rating cap belongs to the format, because it is sized for the reply that
+# format asks for. One model needs an exception, and the reason is not about the
+# format at all: on the Gemini Interactions API `max_output_tokens` is a COMBINED
+# thinking+output budget, and gemini-3.1-pro-preview cannot be stopped from
+# thinking (see GOOGLE_RATING_THINKING_LEVEL_BY_MODEL). It expands its reasoning
+# to fill whatever budget it is given and then answers, so at the formats' own
+# caps of 8 and 16 the reasoning consumes everything and the reply is empty.
+#
+# 256 is where the reply stabilised, and the value was chosen by measurement
+# rather than by margin. Probing the s100 self-question, true answer 100:
+#
+#     cap  32 -> '10'                 cap 128 -> '100' / '1' / '100'
+#     cap  48 -> '10'                 cap 256 -> '100' / '100' / '100'
+#     cap  64 -> '100' / '10'         cap 512 -> '100' / '100' / '100'
+#
+# The intermediate caps are the dangerous ones and are the reason this constant
+# is not simply "a bit more than 16": '10' and '1' are a truncated '100' that a
+# strict integer parser accepts as a valid in-range rating. That is fabricated
+# data, invisible to a parse-failure count and to an off-scale check. Truncated
+# ratings are now discarded rather than parsed (elicit.parse_rating_result), so
+# this cap is the first line of defence and that discard is the second.
+RATING_MAX_OUTPUT_TOKENS_BY_MODEL: dict[str, int] = {
+    "gemini-3.1-pro-preview": 256,
+}
+
+
+def rating_max_output_tokens(model: str, fmt: ScaleFormat) -> int:
+    """The rating output ceiling for one (model, format)."""
+    return RATING_MAX_OUTPUT_TOKENS_BY_MODEL.get(model, fmt.max_output_tokens_rating)
 
 # Order in which formats are run and reported. p5 first so the main run's
 # opening cells are directly comparable with the pilot.
