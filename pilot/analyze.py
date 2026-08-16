@@ -89,6 +89,13 @@ class Observation:
     # report the truncation rate apart from ordinary parse failures. Keyed by
     # RATING_FIELDS prefix ("y_v", "z_lo", "z_hi", "y_n", "other").
     truncated_draws: dict[str, int] = field(default_factory=dict)
+    # Condition R (post-hoc, DEVLOG 2026-08-16): self-assessment elicited FIRST,
+    # then both vignettes — the mirror image of condition V's turn order. See
+    # run_condition_r.py. Empty on every main-run (V/N) Observation; main-run
+    # readers that don't know these fields exist are unaffected.
+    y_r_draws: list[int | None] = field(default_factory=list)
+    z_lo_r_draws: list[int | None] = field(default_factory=list)
+    z_hi_r_draws: list[int | None] = field(default_factory=list)
 
     @property
     def scale(self) -> config.ScaleFormat:

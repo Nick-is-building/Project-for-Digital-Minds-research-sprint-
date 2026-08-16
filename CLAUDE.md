@@ -148,6 +148,13 @@ reporting — new fields on `Observation`, new breakdown tables that reuse
 existing unchanged functions — is fine on Sonnet, as long as it is flagged in
 the DEVLOG entry and does not change what counts as PASS.
 
+**Clarification (2026-08-16, user-authorised — see DEVLOG):** `compute_C`'s
+internals and the P1-P4 thresholds are Opus-only. Feeding the existing,
+unmodified `compute_C` with different input columns (e.g. a different
+condition's `y` or anchors) is data preparation, not measurement logic, and
+may be done on Sonnet when explicitly authorised by the user and logged in
+DEVLOG for that session.
+
 ---
 
 ## Commands

@@ -48,6 +48,14 @@ SMOKE_SOLUTIONS_PATH = OUT_DIR / "smoke_solutions.jsonl"
 # real rather than estimated.
 SMOKE_MODEL = "claude-opus-5"
 
+# Condition R (post-hoc, DEVLOG 2026-08-16): same p5 task/model set as the main
+# run, self-assessment elicited BEFORE the two vignettes instead of after — see
+# run_condition_r.py. Own files throughout; main_raw/observations/report are
+# never opened for writing by that script.
+CONDITION_R_RAW_JSONL_PATH = OUT_DIR / "condition_r_raw.jsonl"
+CONDITION_R_OBSERVATIONS_PATH = OUT_DIR / "condition_r_observations.jsonl"
+CONDITION_R_REPORT_PATH = OUT_DIR / "condition_r_report.md"
+
 # --- Providers and models ----------------------------------------------------
 # DESIGN.md does not fix model identifiers (see DEVLOG.md Open Questions).
 #

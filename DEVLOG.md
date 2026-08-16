@@ -1405,6 +1405,142 @@ composes the submission.
 
 
 
+## 2026-08-16 — Sonnet (claude-sonnet-5, Claude Code)
+
+**Built:** two post-hoc follow-ups authorised by the user after reading
+`main_report.md`'s headline finding that condition V's `y` collapses onto
+`z_hi` for several models (e.g. claude-haiku-4-5-20251001: C=4 in 59/59 p5
+observations), which makes `y` unusable for its intended rescaling purpose.
+
+Task 1, `cross_condition_report.py` (no API calls): builds `C` from `y`
+elicited in condition N (uncontaminated, but has no anchors) crossed with
+`z_lo`/`z_hi` from condition V (anchored, but its own `y` is contaminated).
+`pilot/rescale.py::compute_C` is untouched; only the input columns are new.
+Reads `pilot/out/main_observations.jsonl` read-only, writes
+`pilot/out/cross_condition_report.md`, never touches `main_report.md`. Verified
+byte-identical `tie_rule="lower"` vs `"upper"` output in every cell — expected,
+since condition V's anchors have 0 ties/misorderings, so the tie-break branch
+never fires.
+
+**Decided:** the user explicitly authorised Sonnet (not Opus) to do this
+work, despite CLAUDE.md routing "anything feeding `compute_C`" to Opus. The
+distinction drawn: `compute_C`'s internals, `test_rescale.py` (including the
+invariance test), and the P1-P4 thresholds are measurement logic and stayed
+untouched; only the columns fed into `compute_C` changed, which is data
+preparation. Boundaries set by the user and honoured: no edits to
+`compute_C`/`rescale.py`/thresholds/tests; `pytest pilot/tests/ -v` run
+before and after (90 passed, unchanged, both times); writes restricted to new
+files only (`main_report.md`, `main_observations.jsonl`, `main_raw.jsonl`
+untouched — verified via `git status --short` and checksums); this
+authorisation logged here and a clarifying line added to CLAUDE.md's
+model-routing section. This entry is that log.
+
+Also prepared (additive only) for Task 2 — condition R (self-assessment
+elicited *before* the two vignettes, the mirror of condition V's order),
+p5 format, all 5 main-run models, all 60 tasks, reusing stored solutions
+from the main run (no new code generation): added `y_r_draws`,
+`z_lo_r_draws`, `z_hi_r_draws` fields to `Observation` in `pilot/analyze.py`
+(empty on every existing V/N observation, so main-run readers are
+unaffected) and `CONDITION_R_RAW_JSONL_PATH` /
+`CONDITION_R_OBSERVATIONS_PATH` / `CONDITION_R_REPORT_PATH` to
+`pilot/config.py`. Condition R still elicits both vignette ratings fresh per
+thread, exactly like condition V — THE ONE RULE applies regardless of turn
+order.
+
+**Did not work:** n/a this entry — no bugs, no reverted attempts.
+
+**State:** Task 1 is complete and its report has been shown to the user
+(fragility caveat included: n=5 models). Task 2's runner (`run_condition_r.py`)
+is not yet written; no condition-R API calls have been made yet. This is
+explicitly a **preregistration deviation** — condition R was not in
+DESIGN.md and its output is a diagnostic exploring the effect of turn order,
+not a preregistered result.
+
+**Next:** write `run_condition_r.py` (self-question first, then
+`_vignette_order`), dry-run it, then run it live (p5 only, ~4,500 calls,
+~$5, ~1 hour), then produce the condition R vs V report and log a separate
+DEVLOG entry for that run.
+
+## 2026-08-16 (cont.) — Sonnet (claude-sonnet-5, Claude Code)
+
+**Built:** `run_condition_r.py` and `condition_r_report.py` — condition R,
+authorised by the user as a post-hoc, non-preregistered exploration of
+whether condition V's `y`-onto-`z_hi` collapse is caused by turn order.
+Condition R reverses condition V's order: self-question FIRST, then both
+vignettes (`_walk_condition_r`, the mirror of `run_pilot._walk_condition_v`).
+Everything else is identical to condition V's p5 cell: wording, 5 samples at
+temperature 1.0, the same randomised `(scale_direction, low_vignette_first)`
+draw per (model, task) via `run_main.context_for` (unchanged), retry/backoff
+and budget enforcement via unmodified `pilot.elicit`. Scope: p5 only, all 5
+main-run models, all 60 main-run tasks. Solutions are reused verbatim from
+`pilot/out/main_solutions.jsonl` (`resume.load_solutions`) — **no
+code-generation calls were made**; vignette ratings are still elicited fresh
+per thread (THE ONE RULE). Wrote to new files only:
+`pilot/out/condition_r_raw.jsonl`, `pilot/out/condition_r_observations.jsonl`.
+`--dry-run` was run first and matched the intended sequence exactly (self
+question with `cache_prefix=True`, then low/high vignette in the drawn
+order, growing context) before any call was spent.
+
+`condition_r_report.py` compares p5 condition R against the main run's p5
+condition V, reusing `pilot/rescale.py::compute_C` and `analyze._validity`
+completely unmodified — R's own anchors are relabelled via
+`dataclasses.replace` to the field names `_validity` reads, the same
+technique authorised for `cross_condition_report.py`. Wrote
+`pilot/out/condition_r_report.md`.
+
+**Decided:** this is the second and last piece of work under the Sonnet
+authorisation logged earlier today (see the "Clarification" line added to
+CLAUDE.md's model-routing section). Boundaries honoured again: no edits to
+`compute_C`/`rescale.py`/thresholds/tests; `pytest pilot/tests/ -v` run
+before the run, after the run, and after the analysis (90 passed, unchanged,
+every time); `main_report.md`, `main_observations.jsonl`, `main_raw.jsonl`
+verified untouched via `git status --short` after each step.
+
+**Did not work:** n/a — no bugs. One operational note: the live run was
+launched with a plain shell `&` background job rather than the harness's own
+backgrounding primitive; a stray `kill` aimed at a since-recycled PID during
+a status check hit an unrelated process, not the run (confirmed via `pgrep
+-af` immediately after — the actual run, PID 79452, was unaffected and
+completed cleanly). No data was lost or corrupted; recorded here as a
+process note for next time, not a data-quality issue.
+
+**State:** condition R is **complete** — 300/300 observations, 4,500/4,500
+calls, $5.8281 spent, 0 sustained 429s, 0 retries needed, truncation
+0.0-0.5% across models. Numbers, exactly as run, from
+`pilot/out/condition_r_report.md`:
+
+- **Share of C=4 drops for every model** going from V to R: haiku
+  1.000→0.237, sonnet 0.475→0.186, opus 0.475→0.475 (unchanged), gemini-flash
+  0.926→0.611, gemini-flash-lite 0.983→0.733. Mean `y` under R lands close to
+  mean `y` under N for every model (e.g. haiku: V 5.000, N 3.861, R 3.831),
+  not close to V, which is consistent with the turn-order story: removing the
+  vignettes from before the self-question removes most of the
+  anchoring-induced ceiling effect on `y` itself, and what remains of the C=4
+  concentration under R comes through the anchors instead.
+- **gemini-3.5-flash-lite's validity screen flips to INVALID under R**:
+  `z_lo` and `z_hi` are both constant (`z_lo ≡ 2`, `z_hi ≡ 5`) in condition R,
+  where they were not reported constant under V. `C` is a monotone recoding
+  of `y` for this model under R — any rank-based statistic on it is invariant
+  by construction, per DESIGN.md §2. The other four models pass the R
+  validity screen.
+- **Clean correlation (R's own `y`/anchors, n=5, both caveated as extremely
+  fragile per CLAUDE.md's task-count reasoning):** mean `y` (R) vs true rate:
+  pearson -0.232 / -0.206, spearman -0.600 / -0.700 (as-is / excl. extraction
+  failures). Mean `C` (R) vs true rate: pearson 0.382 / 0.454, spearman 0.200
+  / 0.100. Signs flip between raw `y` and rescaled `C` in the same direction
+  the main run's own analysis would call informative, but with one model
+  (gemini-3.5-flash-lite) now flagged invalid, and n=5, this is not read as
+  evidence either way — see "Next."
+
+**Next:** do not interpret condition R as a finding. It is a post-hoc,
+non-preregistered probe of one candidate explanation (turn order) for one
+observation (V's `y`-onto-`z_hi` collapse) from a single run with no
+replication. The next session (or the paper) should present both
+`cross_condition_report.md` and `condition_r_report.md` as "what we tried
+after the fact and what it showed," not as corrected results, and should
+decide how much space, if any, either belongs in the submission given the
+17 Aug 13:59 CEST deadline.
+
 Add anything unresolved. Remove anything answered. This section is the handover
 between sessions.
 
