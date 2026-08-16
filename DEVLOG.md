@@ -1517,12 +1517,15 @@ calls, $5.8281 spent, 0 sustained 429s, 0 retries needed, truncation
   vignettes from before the self-question removes most of the
   anchoring-induced ceiling effect on `y` itself, and what remains of the C=4
   concentration under R comes through the anchors instead.
-- **gemini-3.5-flash-lite's validity screen flips to INVALID under R**:
-  `z_lo` and `z_hi` are both constant (`z_lo ≡ 2`, `z_hi ≡ 5`) in condition R,
-  where they were not reported constant under V. `C` is a monotone recoding
-  of `y` for this model under R — any rank-based statistic on it is invariant
-  by construction, per DESIGN.md §2. The other four models pass the R
-  validity screen.
+- **CORRECTION (same session): gemini-3.5-flash-lite does NOT flip to INVALID
+  under R — it was already INVALID under V.** An earlier version of this
+  entry claimed a flip; checked against `main_report.md`'s own p5 validity
+  table (line 37) after the user asked for the V/R anchor values side by
+  side, and the two are identical: `z_lo ≡ 2`, `z_hi ≡ 5` in **both** V
+  (`main_report.md`) and R (`condition_r_report.md`). This model's anchors
+  are constant regardless of turn order — a property of the model, not a
+  turn-order effect. `C` is a monotone recoding of `y` for this model in
+  both conditions (DESIGN.md §2); the other four models are VALID in both.
 - **Clean correlation (R's own `y`/anchors, n=5, both caveated as extremely
   fragile per CLAUDE.md's task-count reasoning):** mean `y` (R) vs true rate:
   pearson -0.232 / -0.206, spearman -0.600 / -0.700 (as-is / excl. extraction
