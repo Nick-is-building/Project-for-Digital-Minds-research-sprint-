@@ -1785,3 +1785,42 @@ between sessions.
   configuration and must never be quoted as a property of the model.** The
   **saturation finding is unaffected**: rating calls cap at 8-16 tokens, are
   answered in one, and no rating call in either pilot was truncated.
+
+## 2026-08-16 — Sonnet (claude-sonnet-5, Claude Code) — numbers consolidation, no API calls
+
+**Built:** `pilot/out/paper_numbers.md` — a single consolidated numbers file
+for the four-page write-up, sourced entirely from `main_report.md`,
+`cross_condition_report.md`, `condition_r_report.md` and the raw JSONL files
+(call counts, timestamps). Every number is tagged with its source file so it
+can be traced during drafting. No new analysis code, no new API calls, no
+figures.
+
+**Decided:** *`pilot/out/` stays gitignored in full, with one named
+exception.* `paper_numbers.md` is a derived summary the write-up cites
+directly, not a raw run artefact, so it is force-added
+(`git add -f pilot/out/paper_numbers.md`) and committed individually rather
+than by loosening the `.gitignore` rule. Logged as a standing rule in
+CLAUDE.md (new "`pilot/out/` is gitignored" section) so this does not need
+re-asking. *Normalised quantities (P1 SD/W, P4 gap/W) were computed for the
+file* — arithmetic only, on numbers already printed in the source reports,
+not a re-run of `rescale.py` or `analyze.py`.
+
+**Did not work:** n/a — no bugs, no API calls, nothing to revert.
+
+**State:** Cross-checked against the source reports while compiling:
+`main_report.md`'s per-format "rating draws" totals reproduce
+DEVLOG's 2026-08-16 06:00 per-model draw counts exactly (e.g.
+claude-haiku-4-5-20251001: 1,475 x 3 formats = 4,425); `cross_condition_report.md`'s
+per-model `passes_hidden` figures are identical across all three of its format
+sections, confirming ground truth is computed once per (model, task) and
+shared, as DESIGN.md §10 requires. One noteworthy fact surfaced during
+compilation and flagged at the top of the new file: in `p5`, 224 of 291
+`compute_C` calls (77%) resolve `y == z_hi` via the 0.01 tolerance rather than
+exact equality — the mechanical source of the `C=4` concentration reported
+elsewhere. Also flagged: `mean z_hi` decreases monotonically
+haiku > sonnet > opus independently in all three formats, the one clean
+cross-model monotone pattern found beyond the already-known V→R `C=4` drop.
+
+**Next:** None assigned this session. The write-up should draw exclusively
+from `pilot/out/paper_numbers.md` rather than re-deriving figures from the
+individual reports, so any correction only has to be made in one place.

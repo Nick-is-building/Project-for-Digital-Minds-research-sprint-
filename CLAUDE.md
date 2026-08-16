@@ -192,6 +192,17 @@ Never mark work complete without running the tests and showing the output.
 
 ---
 
+## `pilot/out/` is gitignored — one named exception
+
+`pilot/out/` holds raw run artefacts (some over 50 MB) and is gitignored in
+full; this is deliberate and stays as-is. The one exception: a derived summary
+file that the write-up directly cites (e.g. `paper_numbers.md`) is not a run
+artefact — it is force-added and committed **individually and by name**
+(`git add -f pilot/out/<file>`), never by changing the `.gitignore` rule
+itself. Ask before extending this exception to a new file.
+
+---
+
 ## DEVLOG obligation
 
 At the end of every unit of work — and **before** the user switches sessions —
