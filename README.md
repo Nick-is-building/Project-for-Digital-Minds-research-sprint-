@@ -70,8 +70,8 @@ Built for the Apart Research Digital Minds Research Sprint, Aug 2026.
 
 ## Reproducing the analysis
 
-All of the following runs from committed data. No API key, no network
-access.
+Seven of the following eight commands run from committed data. No API key,
+no network access.
 
 ```bash
 pip install numpy scipy matplotlib python-docx pytest
@@ -79,14 +79,20 @@ python3 -m pytest pilot/tests/ -v                 # 90 tests
 python3 build_figures.py                          # rebuilds pilot/out/figures/*.png
 python3 condition_r_report.py                     # rebuilds pilot/out/condition_r_report.md
 python3 cross_condition_report.py                 # rebuilds pilot/out/cross_condition_report.md
-python3 paper/build_docx.py                       # rebuilds paper/submission.docx
 python3 paper/build_supplementary.py              # rebuilds paper/supplementary_figures.docx
-soffice --headless --convert-to pdf --outdir paper paper/submission.docx
 soffice --headless --convert-to pdf --outdir paper paper/supplementary_figures.docx
+soffice --headless --convert-to pdf --outdir paper paper/submission.docx
+python3 paper/build_docx.py                       # needs a file this repo does not contain
 ```
 
-I ran all eight commands against the committed data before writing this line.
-Every one produced output matching what is already in the repository.
+I ran all eight commands against a fresh clone before writing this line.
+Seven produced output matching what is already in the repository. The
+eighth, `paper/build_docx.py`, raises `FileNotFoundError` on a fresh clone.
+It reads the organiser's blank submission template for page setup and
+styles, and that template is excluded by design (see "Not in the
+repository" below). `paper/submission.docx` and `paper/submission.pdf` are
+committed directly, so a fresh clone already has the built paper and does
+not need this command to check it.
 
 ## Where things are
 
@@ -112,9 +118,12 @@ the extracted solutions, what the analysis actually reads, are committed in
 their place.
 
 The organiser's blank submission template stays out, along with every draft
-or render of the paper that came before the final version. `paper_draft.md`,
-`build_docx.py`, and `build_supplementary.py` are committed because they are
-how the final paper is reproduced.
+or render of the paper that came before the final version. `paper_draft.md`
+and `build_supplementary.py` are committed because they reproduce the
+supplementary PDF from committed data alone. `build_docx.py` is committed as
+the record of how `submission.docx` was built, not as a script a fresh clone
+can rerun: it opens the excluded template for its page setup and styles, so
+it needs that file supplied separately to run again.
 
 Superseded pilot-phase material lives in `archive/` rather than the working
 tree: the first two pilot runs, a scale-coarseness control experiment, two

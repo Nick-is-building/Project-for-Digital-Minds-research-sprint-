@@ -2337,6 +2337,47 @@ import `pilot.elicit` or `pilot.tasks`.
 changes after this entry, re-run the reproduction commands in `README.md`
 and re-check the page count before resubmitting.
 
+## 2026-08-17 (Sonnet) — Fresh-clone test found one command that does not reproduce; README corrected
+
+**Built:** Cloned the just-made commit into `/tmp/repo_test_clone` and ran
+all eight reproduction commands from `README.md` against that clone, not
+against the working repository. Seven succeeded: `pytest pilot/tests/` (90
+passed), `build_figures.py`, `condition_r_report.py`,
+`cross_condition_report.py`, `build_supplementary.py`, and both `soffice`
+conversions. The eighth, `paper/build_docx.py`, raised `FileNotFoundError`
+for `Digital Minds Research Sprint submission template.docx`. That file is
+gitignored by design (it is the organiser's blank template, listed in the
+README's "Not in the repository" section), but it was still present in the
+working repository's root, which is why the same command had appeared to
+work when tested there earlier in this session — that earlier test was
+against a directory that still had the ignored file on disk, not against
+what a real fresh clone receives.
+
+**Decided:** Corrected `README.md` rather than the script. `build_docx.py`
+legitimately needs the template for page setup and styles; committing the
+template would contradict the "stays out" decision already made and logged
+for that file. Reworded the "Reproducing the analysis" section to state
+seven of eight commands run from committed data, moved `build_docx.py` to
+the end of the command list with a comment flagging the missing file, and
+explained that `paper/submission.docx` and `paper/submission.pdf` are
+already committed, so a fresh clone has the built paper without needing to
+rerun that command. Reworded the corresponding line in "Not in the
+repository" to stop implying `build_docx.py` reproduces the paper on its
+own.
+
+**Did not work:** The original README claim ("I ran all eight commands
+against the committed data before writing this line") was true only in the
+sense that all eight commands had been run in an environment that happened
+to still hold an ignored file. It was not a fresh-clone test and the claim
+did not hold up under one.
+
+**State:** `README.md` now accurately describes the reproduction path.
+Re-verified this time by cloning first, not by running commands in place.
+
+**Next:** None. Repeat the actual fresh-clone test, not an in-place one,
+before trusting any future "runs from committed data" claim in this
+repository.
+
 ## Open Questions
 
 - The Discussion cites "(Kang 2025)" while the References entry reads "Kang,
