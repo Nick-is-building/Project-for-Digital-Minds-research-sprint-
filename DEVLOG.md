@@ -1824,3 +1824,110 @@ cross-model monotone pattern found beyond the already-known V→R `C=4` drop.
 **Next:** None assigned this session. The write-up should draw exclusively
 from `pilot/out/paper_numbers.md` rather than re-deriving figures from the
 individual reports, so any correction only has to be made in one place.
+
+## 2026-08-17 — Sonnet (claude-sonnet-5, Claude Code) — figures, reference check, number check, no API calls
+
+**Built:** `build_figures.py` (repo root) — reads `pilot/out/main_observations.jsonl`
+and `pilot/out/condition_r_observations.jsonl` only, writes four 300 dpi PNGs to
+`pilot/out/figures/`: `figure1_validity_screen.png` (§2 validity grid, 5 models
+x 3 formats), `figure2_self_assessment_p5.png` (mean `y` under N/V/R by model,
+SE bars over the 60 p5 tasks), `figure3_self_other_gap.png` (P4 signed gap / W,
+5 models x 3 formats, dashed line at the 0.1875 FAIL threshold),
+`figure4_confidence_accuracy_correlation.png` (Pearson r, raw vs rescaled, for
+p5/p7/s100/R, using the extraction-corrected true-rate). Every number is
+computed at run time from the observation files via `pilot/analyze.py`
+(`_validity`, `_p4`, `_mean`, `_by_model`/`_by_format`) and, for Figure 4, by
+importing `cross_condition_report.py`'s and `condition_r_report.py`'s own
+`build_cells`/`Cell`/`_correlate` — not reimplemented, so Figure 4 uses exactly
+the pairing those two authorised reports use. `pilot/rescale.py::compute_C` is
+not called directly and is not modified. Matplotlib was installed
+(`pip install --user --break-system-packages matplotlib`; PEP 668). All four
+PNGs were visually checked against `pilot/out/paper_numbers.md` §3, §5, §6, §8
+and matched.
+
+**Did (not build):** Verified the pasted reference list (arXiv IDs, titles,
+authors) via a background research agent, and checked every number in the
+pasted paper draft against `paper_numbers.md`/source reports by hand. Neither
+task edited the paper text or DEVLOG/DESIGN.md, per this session's
+instructions — findings were reported back to the user, not applied.
+
+**Did not work:** n/a — no bugs, no API calls, nothing to revert.
+
+**State:** Figures are built and visually verified against the source tables,
+not yet placed in a document. The reference check surfaced two serious issues
+(a likely fabricated co-author + wrong title on the Martorell citation, and a
+conflated RAND-working-paper-vs-journal-article citation for
+Kapteyn/Smith/van Soest) plus several truncated titles and wrong initials —
+full list handed to the user, nothing corrected. The number check surfaced
+five discrepancies in the pasted draft, the most substantial being in §4.6 on
+the correlation figures (a sign claim contradicted by `s100`'s raw Pearson r
+being positive, wrong stated min/max range, and a "sixteen comparisons" count
+that doesn't match the enumerated breakdown) and in the Discussion/Conclusion's
+self/other framing (all five models show positive self-preference on average,
+not just the two Google ones — the two provider groups differ in whether the
+gap crosses the P4 threshold, not in its sign) — full list handed to the user,
+text not edited.
+
+**Next:** Docx/PDF assembly (this session's Task 4) is blocked on the user
+confirming the reference and number-check findings above and saying go.
+
+## 2026-08-17 — Opus (claude-opus-4-7, Claude Code) — paper draft, docx/PDF assembly, reference and number corrections applied
+
+**Built:** `pilot/out/submission/paper_draft.md` (markdown source of truth for the
+paper — hand-edit only this file) and `pilot/out/submission/build_docx.py`
+(regenerates `submission.docx` from the markdown using the official template
+only for page setup and styles; body is cleared entirely so no template
+placeholder/info-box text carries over, tables are rendered with manual
+`w:tcBorders` XML because the template ships no "Table Grid" style, PAGE
+field-code page numbers in footer, figures placed at numbered positions from
+`pilot/out/figures/`). Both files are inside gitignored `pilot/out/` and stay
+local per the user's paper-stays-local rule. Convert to PDF with
+`soffice --headless --convert-to pdf --outdir pilot/out/submission pilot/out/submission/submission.docx`.
+
+**Applied to the draft:** all Task A reference corrections (rebuilt every arXiv
+entry from verified metadata via arxiv.org API cross-checked with WebFetch; two
+deliberate overrides confirmed by user — Martorell kept with Bianchi as real
+co-author, initials fixed to N. Martorell and B. Bianchi; and Kapteyn et al.
+replaced with Van Soest, Delaney, Harmon, Kapteyn & Smith 2011 JRSS-A for the
+objective-validation citation, with the in-text reference updated to match);
+all five Task B number corrections (B1 model name fix, B2 five ratios verified
+against `paper_numbers.md`, B3 self-preference framing revised for all three
+Anthropic models, B4 §4.6 paragraph and Figure 4 caption rewritten with
+verified 8-Pearson-pairing ranges and 12-of-16 sign-change count, B5 raw-data
+size correction and condition-R log addition).
+
+**State:** Paper draft exists at `pilot/out/submission/paper_draft.md` and is
+built to docx and PDF by `pilot/out/submission/build_docx.py`. Current build is
+17 pages. Sections 1-6 (body) alone occupy ~13 pages; the sprint limit is
+8 pages of body, with References and Appendices excluded from that limit. The
+overshoot is a text-length problem, not a layout problem: the generated
+document matches the template exactly on every layout dimension (Arial 11pt
+body inherited from docDefaults, line spacing 1.15 auto = w:line=276, 1-inch
+margins all sides, heading sizes/space-before/space-after all match template
+styles). Figures inserted at their native size at 300 dpi (~6.3 in wide × 3.1
+to 3.6 in tall), rendered at column width without oversized-native-px scaling.
+None of the four tables (Tables 1-4, 4-6 rows each) breaks across a page.
+
+**Two safe layout wins applied this session:** figure width lowered from
+`Inches(6.3)` to `Inches(5.2)` in `build_docx.py`, and the trailing empty
+paragraph after each table removed from `_render_table`. Combined saving ~0.3
+pages: sections tightened (Section 5 moved from p11 line 20 to p11 line 10,
+Section 6 from p13 line 30 to p13 line 20, Code and Data from p14 line 12 to
+p14 line 1) but total page count is still 17 because no full page crossed a
+boundary. The absolute layout ceiling is ~0.5 pages of saving — the remaining
+overshoot is text, not layout.
+
+**Figures are final** at `pilot/out/figures/` (four 300 dpi PNGs generated by
+`build_figures.py` at repo root, unchanged this session): `figure1_validity_screen.png`,
+`figure2_self_assessment_p5.png`, `figure3_self_other_gap.png`,
+`figure4_confidence_accuracy_correlation.png`. Every figure number matches
+`paper_numbers.md`.
+
+**Did not work:** n/a — no bugs, no API calls, nothing to revert.
+
+**Next:** The author will paste shortened replacement text for sections 1, 2
+and 5, plus instructions to move section 3.7 and part of the Limitations
+section into appendices. Nothing else in the paper changes. After the pasted
+edits: rerun `python3 pilot/out/submission/build_docx.py` and then
+`soffice --headless --convert-to pdf --outdir pilot/out/submission pilot/out/submission/submission.docx`,
+report the new page count and body-page count (grep sections with `pdftotext -f N -l N`).
