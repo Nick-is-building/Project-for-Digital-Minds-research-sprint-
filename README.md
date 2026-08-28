@@ -13,7 +13,60 @@ it on the 7-point scale. All fifteen self-other rating gaps, five models
 across three scale formats, are positive, and the two Google models show a
 larger gap than the three Anthropic models in every format.
 
+**Why this matters:** anchoring vignettes are the standard survey-methodology
+fix for exactly this kind of response bias, and they have never been applied
+to LLM self-reports before — prior work (Meyer, Garcia & Wulff, 2026) found
+that 81-90% of between-model variance in LLM self-report instruments is
+directional scale-use bias, not content, which is a problem for any research
+that reads a model's stated confidence, preference, or internal state at face
+value. Code correctness was chosen as the test domain specifically because it
+has checkable ground truth, which welfare-relevant self-reports do not. The
+headline result is a caution, not an endorsement: the correction method
+itself is vulnerable to the same kind of artifact (turn order) it exists to
+fix, so introducing it does not by itself make a self-report trustworthy.
+
 Built for the Apart Research Digital Minds Research Sprint, Aug 2026.
+
+## Limitations
+
+Stated plainly, not softened.
+
+- **n=5 models.** Every cross-model number in this repository — the
+  across-model correlation, the variance-ratio comparison — is computed over
+  five points. `pilot/out/condition_r_report.md`'s own correlation figures are
+  explicitly flagged as fragile for this reason, and the same caveat applies
+  to any cross-model figure elsewhere in the repository.
+- **Two providers only** (Anthropic and Google). A third provider would add
+  more between-model scale-use variance than a third Anthropic model, and
+  that variance is what the effect depends on — so the two-provider set is a
+  real constraint on what "between-model" can show here, not just a smaller
+  sample.
+- **The intended Pro/Flash cross-provider contrast is a Flash-Lite/Flash
+  contrast.** `gemini-3.1-pro-preview` was dropped after tripping a
+  250-request-per-day quota mid-run (see DEVLOG.md, 2026-08-16 06:00); no
+  other non-preview Pro-tier Gemini model was accessible on this key.
+  `gemini-3.5-flash-lite` is a tier down from Flash, not a tier up, and is
+  weaker evidence of a genuine capability-tier contrast than the design
+  intended.
+- **Condition R is post-hoc and not preregistered.** It was added after
+  seeing condition V's results, to test one candidate explanation (turn
+  order) for one observation (`y` collapsing onto `z_hi`). Its own report
+  (`pilot/out/condition_r_report.md`) and DEVLOG.md (2026-08-16, two entries)
+  say this explicitly: it is what was tried after the fact, not a confirmed
+  finding, and should not be read as one.
+- **MBPP hidden-test coverage is thin** — few asserts per task. This was
+  flagged before the main run as needing expansion and was never expanded;
+  it remains an open limitation on how much a "passes all hidden tests"
+  verdict actually confirms about a solution's correctness.
+- **Six `gemini-3.6-flash` observations per format (18 total) have no code
+  to score.** `max_output_tokens` on the Gemini Interactions API caps
+  thinking and output combined; on these six tasks the model spent nearly
+  all of it thinking and the generated code was cut off mid-function. The
+  affected task IDs: `mbpp/31`, `lbpp/python/001`, `lbpp/python/002`,
+  `lbpp/python/016`, `lbpp/python/018`, `lbpp/python/019`. This affects
+  `gemini-3.6-flash`'s `passes_hidden` rate only — all of its rating draws
+  are clean (0% parse failures, 0% truncation) — but that rate must not be
+  quoted without this caveat.
 
 ## Repository map
 
@@ -27,7 +80,7 @@ Built for the Apart Research Digital Minds Research Sprint, Aug 2026.
   reads as "pilot phase," but the package is the current, load-bearing code.
   `run_main.py` and `run_condition_r.py`, the scripts behind the reported
   results, both depend on it.
-  - `pilot/tests/`: 90 tests, no API calls. Run these before reading anything
+  - `pilot/tests/`: 92 tests, no API calls. Run these before reading anything
     else in `pilot/`.
   - `pilot/out/`: the data.
     - `main_observations.jsonl` holds the 900 observations behind the main
@@ -55,9 +108,11 @@ Built for the Apart Research Digital Minds Research Sprint, Aug 2026.
   No API calls.
 - `monitor_run.py` watches a run in progress and stops it if a cost or
   error-rate limit trips.
-- `run_pilot.py` is the module the other scripts import for shared
-  turn-sequencing logic, despite its name. Its own pilot-orchestration entry
-  point is superseded; the module is not.
+- `run_pilot.py` is not a pilot-phase script, despite its name. It is the
+  shared turn-sequencing module imported by `run_main.py`,
+  `run_condition_r.py`, `monitor_run.py` and `pilot/tests/test_resume.py`.
+  Its own standalone pilot-orchestration entry point is superseded by
+  `run_main.py`; the message-sequencing functions it exposes are not.
 - `DESIGN.md` defines the instrument: the scale, the question wording, the
   rescaling formula, every threshold.
 - `DEVLOG.md` records what happened, in the order it happened, with the
@@ -75,7 +130,7 @@ no network access.
 
 ```bash
 pip install numpy scipy matplotlib python-docx pytest
-python3 -m pytest pilot/tests/ -v                 # 90 tests
+python3 -m pytest pilot/tests/ -v                 # 92 tests
 python3 build_figures.py                          # rebuilds pilot/out/figures/*.png
 python3 condition_r_report.py                     # rebuilds pilot/out/condition_r_report.md
 python3 cross_condition_report.py                 # rebuilds pilot/out/cross_condition_report.md

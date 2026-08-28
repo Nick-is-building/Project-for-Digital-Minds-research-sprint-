@@ -2378,8 +2378,131 @@ Re-verified this time by cloning first, not by running commands in place.
 before trusting any future "runs from committed data" claim in this
 repository.
 
+## 2026-08-28 — Sonnet (claude-sonnet-5, Claude Code) — legibility pass for a cold reader
+
+**Built:**
+
+- `README.md`: a "Why this matters" paragraph after the opening finding,
+  making the AI-welfare self-report stakes explicit for a reader with no
+  context (previously implicit); a plainly-worded "Limitations" section
+  collecting six items that were previously scattered across DEVLOG entries
+  (n=5 models, two-provider limit, the Flash-Lite/Pro-preview substitution,
+  condition R's post-hoc status, thin MBPP hidden-test coverage, and the six
+  `gemini-3.6-flash` codegen-truncation task IDs); the repo-map line for
+  `run_pilot.py` strengthened to name all four of its actual importers; test
+  counts corrected 90 → 92 in both places the README states them.
+- `pilot/tests/test_vignettes.py` (new, 2 tests): regression coverage for
+  `VIGNETTE_LOW_CODE` failing and `VIGNETTE_HIGH_CODE` passing
+  `VIGNETTE_HIDDEN_ASSERTS`, previously verified only by a one-off sandbox
+  run recorded as a comment in `pilot/tasks.py`.
+- `run_pilot.py`: new module docstring stating plainly, at the top of the
+  file, that despite the name this is not a pilot-phase script — it is the
+  shared turn-sequencing module imported by `run_main.py`,
+  `run_condition_r.py`, `monitor_run.py` and `pilot/tests/test_resume.py`,
+  and only its own standalone CLI entry point is superseded.
+- `CLAUDE.md`: the one-word Commands fix, `pytest tests/ -v` →
+  `pytest pilot/tests/ -v`.
+- `archive/pilot_phase_scripts/README.md`: corrected `check_untested_paths.py`'s
+  DEVLOG citation — it named "2026-08-15, Open Questions", which is wrong on
+  both counts; the actual entry is 2026-08-16 06:00, and it is in the entry
+  body, not Open Questions.
+- `archive/pilot_phase_data/README.md`: added the two files it omitted —
+  `observations_scale100.jsonl` and `report_scale100.md`, the 0-100
+  scale-coarseness control run's output — which were physically present in
+  that directory but undocumented; the README described 4 of the 6 files
+  actually there.
+
+**Decided:**
+
+- **`run_pilot.py` is not renamed**, on the user's explicit instruction
+  overriding a plan I had proposed and gotten approved before this session:
+  DEVLOG.md itself references the file by its current name throughout
+  2,300+ lines of historical record, and those entries are never edited to
+  match a later rename — so renaming now would either orphan every one of
+  those references or require rewriting history, and the user vetoed both.
+  Separately, the sprint's judging window is open and `main` is what
+  reviewers see, so no structural refactor was wanted regardless. Logged as
+  an Open Question below instead, to be done after results are published.
+- **Checked whether the paper cites `run_pilot.py` by name before agreeing
+  not to touch it**, per the user's explicit request: `paper/paper_draft.md`,
+  `paper/build_supplementary.py`, `paper/build_docx.py`, and
+  `paper/submission.docx`'s own `word/document.xml` (read directly via
+  `zipfile`, not `grep` on the compressed container) contain zero
+  occurrences of "run_pilot". Renaming it later cannot affect the submitted
+  paper text.
+- **The user asked for a line in "CLAUDE.md's Open Questions"; CLAUDE.md has
+  no such section** — the project's actual Open Questions section is at the
+  bottom of DEVLOG.md, per CLAUDE.md's own DEVLOG-obligation rule. Added the
+  line there instead of inventing a new section in CLAUDE.md, and am
+  flagging the substitution here rather than silently doing something
+  different from the literal instruction.
+- Did not rename `pilot/` (the package). Verified before the prior session's
+  plan was even proposed: `pilot/out/` is explicitly read-only, and both
+  `paper/paper_draft.md`'s "Code and Data" section and
+  `paper/build_docx.py`/`build_supplementary.py` (also read-only) cite or
+  hardcode `pilot/out/...` paths. Renaming the package would break those or
+  require editing files this task forbids touching. Unchanged this session;
+  restated here since it bears on the same naming question.
+
+**Did not work:**
+
+- **`soffice --headless --convert-to pdf` fails on this session's container
+  for every input, not just this repository's files.** Both README
+  reproduction commands 6 and 7 (`supplementary_figures.docx` →
+  `.pdf`, `submission.docx` → `.pdf`) failed with `Error: source file could
+  not be loaded`. Isolated before concluding anything about the repo: a
+  minimal one-paragraph `.docx` built fresh with `python-docx`, and even a
+  five-byte `.txt` file, both fail to convert the same way.
+  `soffice.bin` itself exits with code 81 regardless of a fresh profile, a
+  reused (already-initialized) profile, an explicit `HOME` override, or the
+  Bash tool's sandbox disabled entirely (`dangerouslyDisableSandbox`) — so
+  this is not a sandbox-permission artifact of this harness, and not
+  something introduced by any edit this session. `/dev/shm` has 16G free and
+  `fc-list` returns 59 fonts, so it is not the two most common causes either.
+  This looks like a broken LibreOffice install in this specific container,
+  not a repository defect: `paper/submission.pdf` and
+  `paper/supplementary_figures.pdf` are already committed, untouched by this
+  session, and identical to what the 2026-08-17 fresh-clone test verified.
+  But it means **this session could not independently re-confirm README
+  reproduction commands 6 and 7**, only reason from a different environment's
+  earlier success. Left unresolved — see Next.
+
+**State:** `python3 -m pytest pilot/tests/ -v` → **92 passed** (90
+pre-existing + 2 new). Of the README's 8 reproduction commands: 1
+(`pytest`), 2 (`build_figures.py`), 3 (`condition_r_report.py`), 4
+(`cross_condition_report.py`) and 5 (`paper/build_supplementary.py`) all ran
+clean; `git diff --stat` after running 2-4 shows **zero changes under
+`pilot/out/`**, confirming they regenerated byte-identical output rather than
+drifting from what is committed. Command 8 (`paper/build_docx.py`) fails
+exactly as the README already documents — `FileNotFoundError` on the
+gitignored organiser template. Commands 6 and 7 (the two `soffice`
+conversions) could not be verified this session — see "Did not work".
+`git diff --stat`: exactly `CLAUDE.md`, `DEVLOG.md`, `README.md`,
+`archive/pilot_phase_data/README.md`, `archive/pilot_phase_scripts/README.md`,
+`run_pilot.py` modified, plus the new `pilot/tests/test_vignettes.py` — no
+file outside the approved list touched, and nothing under `paper/` or
+`pilot/out/` modified.
+
+**Next:** Before trusting README commands 6-7 again, re-run them in an
+environment where `soffice --headless` actually completes a conversion (this
+one's LibreOffice install cannot, independent of this repository) —
+otherwise the 2026-08-17 fresh-clone verification is the most recent evidence
+those two steps work. Rename `run_pilot.py` → `sequencing.py` after sprint
+results are published (see Open Questions).
+
 ## Open Questions
 
 - The Discussion cites "(Kang 2025)" while the References entry reads "Kang,
   P. (2026)" — flagged to the author in the prior session, not corrected,
   since DESIGN.md and paper content are author-owned.
+- **`run_pilot.py` should be renamed to `sequencing.py` once sprint results
+  are published.** It is the shared turn-sequencing module imported by
+  `run_main.py`, `run_condition_r.py`, `monitor_run.py` and
+  `pilot/tests/test_resume.py`, not a pilot-phase script — but DEVLOG.md
+  references it by its current name throughout 2,300+ lines of historical
+  record, and this file is never rewritten to match a later rename. Deferred
+  deliberately this session (2026-08-28): the judging window is open and
+  `main` is what reviewers see, so no structural refactor now. A module
+  docstring was added instead, stating this plainly at the top of the file.
+  When the rename does happen, log it here — do not edit the historical
+  entries above to match.
