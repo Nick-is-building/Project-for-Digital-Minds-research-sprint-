@@ -1,4 +1,15 @@
-"""Pilot orchestrator: 2 models x 20 tasks, conditions V and N, plus the P4 probe.
+"""Despite the filename, this is not a pilot-phase script.
+
+This module is the shared turn-sequencing library for the whole project: every
+script that elicits ratings from a model imports it — `run_main.py` and
+`run_condition_r.py` (the runners behind the reported results),
+`monitor_run.py` (the run watchdog), and `pilot/tests/test_resume.py`. Its own
+standalone pilot-orchestration entry point below (`python run_pilot.py`, 2
+models x 20 tasks) is superseded by `run_main.py`; the message-building
+functions it calls are not — they are the single source of truth for turn
+order, reused unchanged by every later run. The name is a historical accident
+of what got built first, not a description of current scope. See
+`CLAUDE.md`'s Open Questions for why it has not been renamed.
 
 Sequencing only. The scale and question wording live in `pilot.config`, the
 rescaling in `pilot.rescale`, the metrics and thresholds in `pilot.analyze`,

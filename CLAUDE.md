@@ -160,7 +160,7 @@ DEVLOG for that session.
 ## Commands
 
 ```bash
-pytest tests/ -v                 # all must pass before any API call
+pytest pilot/tests/ -v            # all must pass before any API call
 python run_pilot.py --dry-run    # prints exact message sequence, no API calls
 python run_pilot.py              # full pilot
 ```
